@@ -62,7 +62,7 @@ State is persisted to localStorage. Everything persists by default — user data
 
 Two flat arrays, one of sections and one of tasks, each task holding the identifier of its section. No nesting.
 
-Order is computed with the `functional-indexing` library, so moving a section or task updates only that record's order key rather than every sibling's.
+Order is computed with the `fractional-indexing` library, so moving a section or task updates only that record's order key rather than every sibling's.
 
 Performance is not a concern unless an approach is orders of magnitude off, or worse than quadratic.
 
