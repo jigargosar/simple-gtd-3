@@ -22,3 +22,7 @@ dist
 
 # Elm
 elm-stuff
+
+# Local vector store written by the local-rag MCP server. Regenerable.
+# Added 2026-07-25 10:31 IST
+lancedb/
