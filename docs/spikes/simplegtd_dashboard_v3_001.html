@@ -1,0 +1,2288 @@
+<!DOCTYPE html>
+<!--
+  SimpleGTD — dashboard spike v3.001
+  Built against docs/simplegtd_spec_v3_004.md. Single self-contained file: no
+  build, no dependencies, no network needed. Open it and it runs.
+
+  ── Non-negotiables ──────────────────────────────────────────────────────────
+  Filling the spec's first Pending item. These are the invariants the build is
+  held to; everything else is negotiable.
+
+   1. Nothing is lost. Every change persists on the spot, and a reload puts you
+      back where you were — including the line your cursor was on.
+   2. Capture is always one keystroke away, and never blocked by a modal.
+   3. Destructive actions are undoable or confirmed. Never silent and permanent.
+   4. Anything the mouse can do, the keyboard can do, with a visible cursor.
+   5. Every empty state names what you are looking at and offers the next move.
+   6. No hidden state. Filter, collapse and capture destination all show
+      themselves in the interface.
+   7. Order is stable. Moving one thing rewrites one order key, never a sibling's.
+   8. Text never overflows sideways and is never truncated into ambiguity.
+
+  ── Judgement calls, so they are arguable rather than accidental ─────────────
+  · fractional-indexing is ported inline, not imported: a single file on file://
+    cannot use ES modules, and the spike must run offline. Faithful to v4.0.0
+    defaults, with a load-time self-check.
+  · Light only. The risograph direction commits to one look rather than half
+    committing to two.
+  · Webfonts come from Google Fonts with a real system fallback stack, so the
+    file still reads correctly with no network.
+  · Undo history is per session. Restoring a stack of undos across a reload
+    would let you rewind changes you made in a sitting you had already closed.
+-->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SimpleGTD — dashboard spike v3.001</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Martian+Mono:wght@400;500;600;700&family=Instrument+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+
+<style>
+/* ==========================================================================
+   SimpleGTD — dashboard spike
+   Direction: risograph two-ink print on grey stock. GTD's own world is the
+   physical filing system — tabbed dividers, ruled cards, cheap fast
+   reproduction. Two inks (Federal Blue, Fluorescent Pink), flat fills, no
+   gradients, and one honest misregistration: the second ink prints slightly
+   off behind the tab of the section your cursor is in.
+   ========================================================================== */
+
+:root {
+  --stock:      #DCDDDA;  /* page — cool newsprint grey */
+  --card:       #F7F7F5;  /* section card */
+  --ink:        #14161C;  /* primary text            16.85:1 on card */
+  --mute:       #494D57;  /* secondary text           7.89:1 on card */
+  --blue:       #1F3BA8;  /* ink 1                    8.70:1 on card */
+  --pink:       #D62A8F;  /* ink 2                    4.27:1 on card */
+  --rule:       rgba(31, 59, 168, .22);   /* ledger rule, blue ink at 22% */
+  --edge:       rgba(20, 22, 28, .22);
+  --wash:       rgba(31, 59, 168, .10);   /* hover tint */
+  --wash-firm:  rgba(31, 59, 168, .17);   /* cursor tint */
+  --shadow:     3px 3px 0 rgba(20, 22, 28, .07);
+
+  --mono: "Martian Mono", "Cascadia Mono", Consolas, ui-monospace, monospace;
+  --sans: "Instrument Sans", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+
+  --col: 46rem;
+  --row: 2.875rem;   /* ruled rhythm — 46px */
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+* { margin: 0; }
+
+html {
+  scrollbar-gutter: stable;
+  background: var(--stock);
+  -webkit-text-size-adjust: 100%;
+}
+html.is-locked { overflow: hidden; }
+
+body {
+  font-family: var(--sans);
+  font-size: 1rem;
+  line-height: 1.45;
+  color: var(--ink);
+  background: var(--stock);
+  padding-bottom: 5rem;
+}
+
+button, input { font: inherit; color: inherit; }
+button { background: none; border: 0; cursor: pointer; }
+:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 2px; }
+::selection { background: var(--pink); color: var(--card); }
+
+.u-mono {
+  font-family: var(--mono);
+  font-size: .6875rem;
+  font-weight: 600;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+kbd {
+  font-family: var(--mono);
+  font-size: .625rem;
+  font-weight: 500;
+  padding: .2em .45em;
+  border: 1px solid var(--edge);
+  border-radius: 3px;
+  background: var(--card);
+  color: var(--mute);
+  white-space: nowrap;
+}
+
+/* ---------- header: the capture bar is the thesis ---------- */
+
+.bar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: var(--stock);
+  border-bottom: 1px solid var(--edge);
+  padding: .75rem 1.25rem .625rem;
+}
+.bar-in {
+  max-width: var(--col);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: .625rem;
+}
+.bar-top {
+  display: flex;
+  align-items: center;
+  gap: .875rem;
+}
+
+.mark {
+  position: relative;
+  flex: none;
+  font-family: var(--mono);
+  font-size: .75rem;
+  font-weight: 700;
+  letter-spacing: .1em;
+  color: var(--blue);
+  padding: .125rem 0;
+}
+/* The off-register second ink is spent in exactly one place — the tab of the
+   section holding the cursor — so it reads as information, not decoration. */
+
+/* capture */
+.capture {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+  background: var(--card);
+  border: 1.5px solid var(--edge);
+  border-radius: 4px;
+  box-shadow: var(--shadow);
+}
+.capture:focus-within {
+  border-color: var(--blue);
+  box-shadow: 3px 3px 0 rgba(31, 59, 168, .18);
+}
+.dest {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: .375rem;
+  min-height: 2.75rem;
+  padding: 0 .625rem 0 .75rem;
+  border-right: 1px solid var(--rule);
+  color: var(--blue);
+  max-width: 11rem;
+}
+.dest > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dest:hover { background: var(--wash); }
+#capture-field {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 2.75rem;
+  padding: 0 .75rem;
+  border: 0;
+  background: none;
+  font-size: 1.0625rem;
+}
+#capture-field:focus { outline: 0; }
+#capture-field::placeholder { color: var(--mute); opacity: .85; }
+.capture-hint {
+  flex: none;
+  display: flex;
+  align-items: center;
+  padding-right: .625rem;
+}
+
+/* tools row */
+.bar-tools {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  flex-wrap: wrap;
+}
+.seg {
+  display: flex;
+  border: 1px solid var(--edge);
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--card);
+}
+.seg button {
+  min-height: 2.25rem;
+  padding: 0 .8125rem;
+  color: var(--mute);
+  border-right: 1px solid var(--edge);
+}
+.seg button:last-child { border-right: 0; }
+.seg button:hover { background: var(--wash); color: var(--ink); }
+.seg button[aria-pressed="true"] {
+  background: var(--blue);
+  color: var(--card);
+}
+.tool {
+  display: inline-flex;
+  align-items: center;
+  gap: .4375rem;
+  min-height: 2.25rem;
+  padding: 0 .8125rem;
+  border: 1px solid var(--edge);
+  border-radius: 4px;
+  background: var(--card);
+  color: var(--mute);
+}
+.tool:hover { background: var(--wash); color: var(--ink); }
+.bar-spacer { flex: 1 1 auto; }
+
+/* ---------- the column ---------- */
+
+.column {
+  max-width: var(--col);
+  margin: 0 auto;
+  padding: 1.5rem 1.25rem 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1.375rem;
+}
+
+.notice {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  flex-wrap: wrap;
+  padding: .75rem .875rem;
+  border: 1px dashed var(--blue);
+  border-radius: 4px;
+  color: var(--mute);
+  background: var(--wash);
+}
+.notice strong { color: var(--ink); font-weight: 600; }
+
+/* section */
+.sec { display: flex; flex-direction: column; }
+.sec[data-drop="before"] { box-shadow: 0 -3px 0 var(--blue); }
+.sec[data-drop="after"]  { box-shadow: 0 3px 0 var(--blue); }
+
+.tabline {
+  display: flex;
+  align-items: flex-end;
+  gap: .5rem;
+  padding-left: .125rem;
+}
+.tab-wrap { position: relative; display: inline-flex; max-width: min(100%, 24rem); }
+.tab-wrap::before {          /* SIGNATURE: second ink, off register */
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--pink);
+  clip-path: polygon(0 0, calc(100% - .875rem) 0, 100% 100%, 0 100%);
+  transform: translate(-3px, 3px);
+  opacity: 0;
+  z-index: 0;
+}
+.sec.is-cursor .tab-wrap::before { opacity: 1; }
+/* clip-path clips an element's own outline, so the tab's focus ring has to be
+   drawn by the wrapper around it or keyboard focus is invisible. */
+.tab-wrap:has(.tab:focus-visible) {
+  outline: 2px solid var(--ink);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+.tab {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  min-width: 0;
+  min-height: 2rem;
+  padding: .375rem 1.625rem .375rem .75rem;
+  background: var(--blue);
+  color: var(--card);
+  clip-path: polygon(0 0, calc(100% - .875rem) 0, 100% 100%, 0 100%);
+  text-align: left;
+}
+.tab:hover { background: #162C82; }
+.tab:focus-visible { outline: 0; }   /* the wrapper draws it — see above */
+.tab-name {
+  font-family: var(--mono);
+  font-size: .6875rem;
+  font-weight: 600;
+  letter-spacing: .11em;
+  text-transform: uppercase;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chev { flex: none; font-size: .625rem; opacity: .85; }
+.tab-input {
+  min-width: 0;
+  width: 100%;
+  min-height: 1.75rem;
+  padding: .3125rem .6875rem;
+  border: 2px solid var(--ink);
+  border-radius: 3px;
+  background: var(--card);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: .6875rem;
+  font-weight: 600;
+  letter-spacing: .11em;
+  text-transform: uppercase;
+}
+
+.sec-tools { display: flex; gap: .125rem; padding-bottom: .125rem; opacity: 0; }
+.sec:hover .sec-tools,
+.sec:focus-within .sec-tools,
+.sec.is-cursor .sec-tools { opacity: 1; }
+@media (hover: none) { .sec-tools { opacity: 1; } }
+
+.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 4px;
+  color: var(--mute);
+}
+.icon:hover { background: var(--wash-firm); color: var(--blue); }
+.icon.is-danger:hover { background: rgba(214, 42, 143, .16); color: var(--pink); }
+.icon svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+
+/* card */
+.card {
+  background: var(--card);
+  border: 1px solid var(--edge);
+  border-radius: 0 4px 4px 4px;
+  box-shadow: var(--shadow);
+  padding: .25rem 0;
+}
+.tasks { list-style: none; padding: 0; }
+
+.task {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: .125rem;
+  min-height: var(--row);
+  padding: 0 .375rem 0 .25rem;
+  border-bottom: 1px solid var(--rule);
+  scroll-margin: 7rem 0 3rem;
+}
+.task:last-child { border-bottom: 0; }
+.task::before {          /* hover/cursor tint — inset so targets never fuse */
+  content: "";
+  position: absolute;
+  inset: 2px 4px;
+  border-radius: 5px;
+  background: transparent;
+  pointer-events: none;
+}
+.task:hover::before { background: var(--wash); }
+.task.is-cursor::before { background: var(--wash-firm); }
+.task.is-cursor { box-shadow: inset 3px 0 0 var(--pink); }
+.task[data-drop="before"] { box-shadow: inset 0 2px 0 var(--blue); }
+.task[data-drop="after"]  { box-shadow: inset 0 -2px 0 var(--blue); }
+.task.is-flash::before { background: rgba(214, 42, 143, .22); }
+
+.grip {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.375rem;
+  min-height: var(--row);
+  color: var(--mute);
+  opacity: 0;
+  cursor: grab;
+}
+.task:hover .grip, .task:focus-within .grip, .task.is-cursor .grip { opacity: .8; }
+.grip:hover { opacity: 1; }
+@media (hover: none) { .grip { opacity: .8; } }
+
+.box {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.75rem;
+  min-height: var(--row);
+}
+.box::before {
+  content: "";
+  width: 1.25rem;
+  height: 1.25rem;
+  border: 2px solid var(--blue);
+  border-radius: 3px;
+}
+.box:hover::before { background: var(--wash-firm); }
+.box[aria-checked="true"]::before {
+  background: var(--pink);
+  border-color: var(--pink);
+}
+.box svg {
+  position: absolute;
+  width: .875rem;
+  height: .875rem;
+  fill: none;
+  stroke: var(--card);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0;
+}
+.box[aria-checked="true"] svg { opacity: 1; }
+
+.text {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: .75rem .5rem .75rem .125rem;
+  overflow-wrap: anywhere;
+  cursor: text;
+}
+.task.is-done .text {          /* strike the words, not the whole row */
+  color: var(--mute);
+  text-decoration: line-through;
+  text-decoration-color: var(--pink);
+  text-decoration-thickness: 2px;
+}
+.task-tools { display: flex; gap: .125rem; align-self: center; opacity: 0; }
+.task:hover .task-tools,
+.task:focus-within .task-tools,
+.task.is-cursor .task-tools { opacity: 1; }
+@media (hover: none) { .task-tools { opacity: 1; } }
+
+.edit {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: .625rem .5rem;
+  border: 2px solid var(--blue);
+  border-radius: 4px;
+  background: var(--card);
+}
+.edit:focus { outline: 0; box-shadow: 0 0 0 3px var(--wash-firm); }
+
+.add-row {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  width: 100%;
+  min-height: var(--row);
+  padding: 0 .5rem 0 1.75rem;
+  color: var(--mute);
+  text-align: left;
+}
+.add-row:hover { background: var(--wash); color: var(--blue); }
+.add-row .plus { font-size: 1.125rem; line-height: 1; }
+
+/* empty states */
+.empty {
+  padding: 1.25rem 1.5rem 1.375rem;
+  display: flex;
+  flex-direction: column;
+  gap: .5rem;
+  align-items: flex-start;
+}
+.empty h3 { font-size: 1rem; font-weight: 600; }
+.empty p { color: var(--mute); max-width: 34rem; }
+.empty-row { display: flex; align-items: center; gap: .625rem; flex-wrap: wrap; padding-top: .25rem; }
+.empty-tight { padding: .75rem .25rem 1rem; }
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: .5rem;
+  min-height: 2.5rem;
+  padding: 0 1rem;
+  border-radius: 4px;
+  background: var(--blue);
+  color: var(--card);
+  font-weight: 500;
+}
+.btn:hover { background: #162C82; }
+.btn-quiet {
+  background: none;
+  color: var(--blue);
+  border: 1px solid var(--blue);
+}
+.btn-quiet:hover { background: var(--wash-firm); color: var(--blue); }
+
+.zero {
+  padding: 2.5rem 1.5rem 3rem;
+  border: 1px dashed var(--blue);
+  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: .625rem;
+  align-items: flex-start;
+}
+.zero h2 { font-size: 1.375rem; font-weight: 600; letter-spacing: -.01em; }
+
+/* footer */
+.foot {
+  max-width: var(--col);
+  margin: 0 auto;
+  padding: 2.5rem 1.25rem 0;
+  display: flex;
+  align-items: center;
+  gap: .875rem;
+  flex-wrap: wrap;
+  color: var(--mute);
+}
+.link {
+  color: var(--blue);
+  text-decoration: underline;
+  text-decoration-color: var(--pink);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 2px;
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.25rem;
+}
+.link:hover { text-decoration-color: var(--blue); }
+
+/* ---------- dialogs ---------- */
+
+dialog {
+  padding: 0;
+  border: 1.5px solid var(--ink);
+  border-radius: 5px;
+  background: var(--card);
+  color: var(--ink);
+  box-shadow: 6px 6px 0 rgba(20, 22, 28, .18);
+  max-width: min(92vw, 34rem);
+  width: 100%;
+}
+dialog::backdrop { background: rgba(20, 22, 28, .45); }
+.dlg-head {
+  display: flex;
+  align-items: center;
+  gap: .625rem;
+  padding: .75rem .875rem;
+  border-bottom: 1px solid var(--rule);
+  color: var(--blue);
+}
+.dlg-body { padding: .875rem; display: flex; flex-direction: column; gap: .75rem; }
+.dlg-foot {
+  display: flex;
+  align-items: center;
+  gap: .625rem;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  padding: .75rem .875rem;
+  border-top: 1px solid var(--rule);
+}
+.dlg-foot .u-mono { margin-right: auto; color: var(--mute); }
+.field {
+  width: 100%;
+  min-height: 2.75rem;
+  padding: 0 .75rem;
+  border: 1.5px solid var(--edge);
+  border-radius: 4px;
+  background: var(--card);
+  font-size: 1.0625rem;
+}
+.field:focus { outline: 0; border-color: var(--blue); box-shadow: 0 0 0 3px var(--wash-firm); }
+#search-dialog, #picker-dialog { max-width: min(92vw, 38rem); }
+
+.results {
+  list-style: none;
+  padding: 0;
+  max-height: min(52vh, 26rem);
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  display: flex;
+  flex-direction: column;
+  gap: .125rem;
+}
+.results li { display: flex; }
+.result {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  width: 100%;
+  min-height: 2.75rem;
+  padding: .375rem .625rem;
+  border-radius: 4px;
+  text-align: left;
+}
+.result:hover { background: var(--wash); }
+.result.is-on { background: var(--wash-firm); box-shadow: inset 3px 0 0 var(--pink); }
+.result-where {
+  flex: none;
+  max-width: 9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--blue);
+}
+.result-what { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.result.is-done .result-what {
+  color: var(--mute);
+  text-decoration: line-through;
+  text-decoration-color: var(--pink);
+  text-decoration-thickness: 2px;
+}
+mark {
+  background: none;
+  color: inherit;
+  font-weight: 600;
+  border-bottom: 2px solid var(--pink);
+}
+.hint { color: var(--mute); }
+
+.keys { display: grid; grid-template-columns: 1fr; gap: 1.25rem; }
+@media (min-width: 34rem) { .keys { grid-template-columns: 1fr 1fr; } }
+.keys h4 { padding-bottom: .375rem; color: var(--blue); }
+.keys dl { display: grid; grid-template-columns: auto 1fr; gap: .375rem .75rem; align-items: baseline; }
+.keys dt { justify-self: start; }
+.keys dd { color: var(--mute); }
+#help-dialog { max-width: min(92vw, 40rem); }
+#help-dialog .dlg-body { max-height: min(70vh, 34rem); overflow-y: auto; scrollbar-gutter: stable; }
+
+/* toast */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 1.25rem;
+  transform: translateX(-50%);
+  z-index: 40;
+  display: none;
+  align-items: center;
+  gap: .875rem;
+  padding: .625rem .75rem .625rem 1rem;
+  border: 1.5px solid var(--ink);
+  border-radius: 5px;
+  background: var(--card);
+  box-shadow: 4px 4px 0 rgba(20, 22, 28, .18);
+  max-width: min(92vw, 30rem);
+}
+.toast.is-up { display: flex; }
+.toast-msg { overflow-wrap: anywhere; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .task::before, .tab, .icon, .tool, .seg button, .btn, .result {
+    transition: background-color .12s ease, color .12s ease, opacity .12s ease;
+  }
+  .tab-wrap::before { transition: opacity .12s ease; }
+  .task.is-flash::before { transition: background-color .9s ease; }
+}
+
+@media (max-width: 40rem) {
+  .bar-top { flex-wrap: wrap; }
+  .capture { order: 3; width: 100%; }
+  .dest { max-width: 8rem; }
+  .capture-hint { display: none; }
+  .task { padding-left: 0; }
+  .box { width: 2.5rem; }
+}
+</style>
+
+<header class="bar">
+  <div class="bar-in">
+    <div class="bar-top">
+      <div class="mark" aria-label="SimpleGTD">SIMPLEGTD</div>
+      <form class="capture" id="capture-form" autocomplete="off">
+        <button type="button" class="dest u-mono" id="dest-btn" title="Change where captured tasks are filed">
+          <span aria-hidden="true">&rarr;</span><span id="dest-name">Inbox</span>
+        </button>
+        <input id="capture-field" placeholder="Capture a thought&hellip;" aria-label="Capture a thought">
+        <span class="capture-hint"><kbd>c</kbd></span>
+      </form>
+    </div>
+    <div class="bar-tools">
+      <div class="seg u-mono" id="filters" role="group" aria-label="Filter tasks">
+        <button data-filter="all">All</button>
+        <button data-filter="active">Active</button>
+        <button data-filter="done">Done</button>
+      </div>
+      <span class="bar-spacer"></span>
+      <button class="tool u-mono" id="search-btn">
+        <svg aria-hidden="true" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="M16.5 16.5 21 21"></path></svg>
+        Search <kbd>/</kbd>
+      </button>
+      <button class="tool u-mono" id="help-btn">Keys <kbd>?</kbd></button>
+    </div>
+  </div>
+</header>
+
+<main class="column" id="column"></main>
+
+<footer class="foot">
+  <span class="u-mono">Spike v3.001</span>
+  <span class="hint">Everything lives in this browser&rsquo;s localStorage.</span>
+  <span class="bar-spacer"></span>
+  <button class="link u-mono" id="reset-btn">Reset to first run</button>
+</footer>
+
+<div class="toast" id="toast" role="status" aria-live="polite">
+  <span class="toast-msg" id="toast-msg"></span>
+  <button class="btn btn-quiet u-mono" id="toast-undo">Undo <kbd>Ctrl+Z</kbd></button>
+</div>
+
+<dialog id="search-dialog" aria-label="Search tasks">
+  <div class="dlg-head u-mono">Search all sections</div>
+  <div class="dlg-body">
+    <input class="field" id="search-field" placeholder="Type to find a task&hellip;" aria-label="Search tasks" autocomplete="off">
+    <ul class="results" id="search-results"></ul>
+  </div>
+  <div class="dlg-foot">
+    <span class="u-mono"><kbd>&uarr;</kbd> <kbd>&darr;</kbd> move &nbsp;<kbd>Enter</kbd> go &nbsp;<kbd>Esc</kbd> close</span>
+  </div>
+</dialog>
+
+<dialog id="picker-dialog" aria-label="Pick a section">
+  <div class="dlg-head u-mono" id="picker-title">Pick a section</div>
+  <div class="dlg-body">
+    <input class="field" id="picker-field" placeholder="Filter sections&hellip;" aria-label="Filter sections" autocomplete="off">
+    <ul class="results" id="picker-results"></ul>
+  </div>
+  <div class="dlg-foot">
+    <span class="u-mono"><kbd>1</kbd>&hellip;<kbd>9</kbd> pick &nbsp;<kbd>Enter</kbd> confirm &nbsp;<kbd>Esc</kbd> cancel</span>
+  </div>
+</dialog>
+
+<dialog id="confirm-dialog" aria-labelledby="confirm-title">
+  <div class="dlg-head u-mono" id="confirm-title">Delete section</div>
+  <div class="dlg-body">
+    <p id="confirm-msg"></p>
+    <p class="hint" id="confirm-sub"></p>
+  </div>
+  <div class="dlg-foot">
+    <button class="btn btn-quiet" id="confirm-no">Keep it</button>
+    <button class="btn" id="confirm-yes">Delete</button>
+  </div>
+</dialog>
+
+<dialog id="help-dialog" aria-label="Keyboard shortcuts">
+  <div class="dlg-head u-mono">Keyboard</div>
+  <div class="dlg-body">
+    <div class="keys">
+      <div>
+        <h4 class="u-mono">Capture and find</h4>
+        <dl>
+          <dt><kbd>c</kbd></dt><dd>Capture a thought</dd>
+          <dt><kbd>Enter</kbd></dt><dd>File it, stay put for the next one</dd>
+          <dt><kbd>Shift</kbd>+<kbd>Enter</kbd></dt><dd>File into the section you&rsquo;re in</dd>
+          <dt><kbd>&gt;</kbd></dt><dd>Change where it&rsquo;s filed</dd>
+          <dt><kbd>/</kbd></dt><dd>Search all sections</dd>
+          <dt><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></dt><dd>Show all, active, done</dd>
+        </dl>
+      </div>
+      <div>
+        <h4 class="u-mono">Move around</h4>
+        <dl>
+          <dt><kbd>j</kbd> <kbd>&darr;</kbd></dt><dd>Next line</dd>
+          <dt><kbd>k</kbd> <kbd>&uarr;</kbd></dt><dd>Previous line</dd>
+          <dt><kbd>g</kbd> <kbd>g</kbd></dt><dd>First line</dd>
+          <dt><kbd>G</kbd></dt><dd>Last line</dd>
+          <dt><kbd>z</kbd></dt><dd>Collapse or expand the section</dd>
+        </dl>
+      </div>
+      <div>
+        <h4 class="u-mono">Change things</h4>
+        <dl>
+          <dt><kbd>Enter</kbd></dt><dd>Edit the line you&rsquo;re on</dd>
+          <dt><kbd>x</kbd> <kbd>Space</kbd></dt><dd>Mark done or not done</dd>
+          <dt><kbd>n</kbd></dt><dd>Add a task here</dd>
+          <dt><kbd>s</kbd></dt><dd>Add a section here</dd>
+          <dt><kbd>m</kbd></dt><dd>Move task to another section</dd>
+        </dl>
+      </div>
+      <div>
+        <h4 class="u-mono">Order and undo</h4>
+        <dl>
+          <dt><kbd>Alt</kbd>+<kbd>&darr;</kbd></dt><dd>Move the line down</dd>
+          <dt><kbd>Alt</kbd>+<kbd>&uarr;</kbd></dt><dd>Move the line up</dd>
+          <dt><kbd>Del</kbd></dt><dd>Delete the line</dd>
+          <dt><kbd>Ctrl</kbd>+<kbd>Z</kbd></dt><dd>Undo the last change</dd>
+          <dt><kbd>Esc</kbd></dt><dd>Close, cancel, step back</dd>
+        </dl>
+      </div>
+    </div>
+    <p class="hint">A task can also be dragged by its handle into any other section.</p>
+  </div>
+  <div class="dlg-foot">
+    <span class="u-mono">Every action here works with the mouse too</span>
+    <button class="btn" id="help-close">Close</button>
+  </div>
+</dialog>
+
+<script>
+"use strict";
+
+/* ==========================================================================
+   1. Order keys
+   A faithful port of fractional-indexing@4.0.0 (rocicorp) at its defaults:
+   base-62 digits, base-52 integer heads, first key "a0". Ported rather than
+   imported because a single file opened over file:// cannot use ES modules —
+   CORS blocks it — and the spike must run with no network and no build step.
+   Moving one record rewrites one order key, never its siblings'.
+   ========================================================================== */
+
+const OrderKey = (function () {
+  const D = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+  const SMALLEST_INT = "A" + D[0].repeat(26);
+  const ZERO = "a" + D[0];
+
+  function intLen(head) {
+    if (head >= "a" && head <= "z") return head.charCodeAt(0) - 96 + 1;
+    if (head >= "A" && head <= "Z") return 90 - head.charCodeAt(0) + 2;
+    throw new Error("invalid order key head: " + head);
+  }
+  function intPart(key) {
+    const len = intLen(key[0]);
+    if (len > key.length) throw new Error("invalid order key: " + key);
+    return key.slice(0, len);
+  }
+  function validateInt(int) {
+    if (int.length !== intLen(int[0])) throw new Error("invalid integer part: " + int);
+  }
+  function inc(x) {
+    validateInt(x);
+    const head = x[0];
+    const digs = x.slice(1).split("");
+    let carry = true;
+    for (let i = digs.length - 1; carry && i >= 0; i--) {
+      const d = D.indexOf(digs[i]) + 1;
+      if (d === D.length) digs[i] = D[0];
+      else { digs[i] = D[d]; carry = false; }
+    }
+    if (carry) {
+      if (head === "Z") return "a" + D[0];
+      if (head === "z") return null;
+      const h = String.fromCharCode(head.charCodeAt(0) + 1);
+      if (h > "a") digs.push(D[0]); else digs.pop();
+      return h + digs.join("");
+    }
+    return head + digs.join("");
+  }
+  function dec(x) {
+    validateInt(x);
+    const head = x[0];
+    const digs = x.slice(1).split("");
+    let borrow = true;
+    for (let i = digs.length - 1; borrow && i >= 0; i--) {
+      const d = D.indexOf(digs[i]) - 1;
+      if (d === -1) digs[i] = D[D.length - 1];
+      else { digs[i] = D[d]; borrow = false; }
+    }
+    if (borrow) {
+      if (head === "a") return "Z" + D[D.length - 1];
+      if (head === "A") return null;
+      const h = String.fromCharCode(head.charCodeAt(0) - 1);
+      if (h < "Z") digs.push(D[D.length - 1]); else digs.pop();
+      return h + digs.join("");
+    }
+    return head + digs.join("");
+  }
+  function midpoint(a, b) {
+    if (b != null && a >= b) throw new Error(a + " >= " + b);
+    if (a.slice(-1) === "0" || (b && b.slice(-1) === "0")) throw new Error("trailing zero");
+    if (b) {
+      let n = 0;
+      while ((a[n] || "0") === b[n]) n++;
+      if (n > 0) return b.slice(0, n) + midpoint(a.slice(n), b.slice(n));
+    }
+    const dA = a ? D.indexOf(a[0]) : 0;
+    const dB = b != null ? D.indexOf(b[0]) : D.length;
+    if (dB - dA > 1) return D[Math.round(0.5 * (dA + dB))];
+    if (b && b.length > 1) return b.slice(0, 1);
+    return D[dA] + midpoint(a.slice(1), null);
+  }
+  function validateKey(key) {
+    if (key === SMALLEST_INT) throw new Error("invalid order key: " + key);
+    const i = intPart(key);
+    if (key.slice(i.length).slice(-1) === "0") throw new Error("invalid order key: " + key);
+  }
+
+  function between(a, b) {
+    if (a != null) validateKey(a);
+    if (b != null) validateKey(b);
+    if (a != null && b != null && a >= b) throw new Error(a + " >= " + b);
+    if (a == null) {
+      if (b == null) return ZERO;
+      const ib = intPart(b), fb = b.slice(ib.length);
+      if (ib === SMALLEST_INT) return ib + midpoint("", fb);
+      if (ib < b) return ib;
+      const r = dec(ib);
+      if (r == null) throw new Error("cannot decrement any further");
+      return r;
+    }
+    if (b == null) {
+      const ia = intPart(a), fa = a.slice(ia.length);
+      const i = inc(ia);
+      return i == null ? ia + midpoint(fa, null) : i;
+    }
+    const ia = intPart(a), fa = a.slice(ia.length);
+    const ib = intPart(b), fb = b.slice(ib.length);
+    if (ia === ib) return ia + midpoint(fa, fb);
+    const i = inc(ia);
+    if (i == null) throw new Error("cannot increment any further");
+    if (i < b) return i;
+    return ia + midpoint(fa, null);
+  }
+
+  function nBetween(a, b, n) {
+    if (n <= 0) return [];
+    if (n === 1) return [between(a, b)];
+    if (b == null) {
+      let c = between(a, null);
+      const out = [c];
+      for (let i = 0; i < n - 1; i++) { c = between(c, null); out.push(c); }
+      return out;
+    }
+    if (a == null) {
+      let c = between(null, b);
+      const out = [c];
+      for (let i = 0; i < n - 1; i++) { c = between(null, c); out.push(c); }
+      return out.reverse();
+    }
+    const mid = Math.floor(n / 2);
+    const c = between(a, b);
+    return nBetween(a, c, mid).concat([c], nBetween(c, b, n - mid - 1));
+  }
+
+  return { between, nBetween };
+})();
+
+/* The ordering invariant is load-bearing, so prove it once on load. */
+(function checkOrderKeys() {
+  const cases = [
+    [[null, null], "a0"],
+    [["a0", null], "a1"],
+    [[null, "a0"], "Zz"],
+    [["a0", "a1"], "a0V"]
+  ];
+  for (const c of cases) {
+    const got = OrderKey.between(c[0][0], c[0][1]);
+    if (got !== c[1]) console.error("order key check failed:", c[0], "->", got, "want", c[1]);
+  }
+  const keys = OrderKey.nBetween(null, null, 5);
+  for (let i = 1; i < keys.length; i++) {
+    if (!(keys[i - 1] < keys[i])) console.error("order keys out of order:", keys);
+  }
+})();
+
+/* ==========================================================================
+   2. State
+   Two flat arrays. A task holds the id of its section — no nesting.
+   Persistence: everything except what would confuse on restore. Sections,
+   tasks, filter, collapsed sections, cursor position, capture destination and
+   an unfinished capture draft all come back. An open dialog, a search query
+   and a half-typed inline edit do not — restoring those would drop you into a
+   state you never left the app in.
+   ========================================================================== */
+
+const STORE = "simplegtd.spike.v3.001";
+const uid = () => Math.random().toString(36).slice(2, 10);
+
+let state = null;
+let editing = null;          // {kind:'task'|'section', id, isNew}
+let undoStack = [];
+let toastTimer = null;
+let flashTimer = null;
+let lastG = 0;
+let drag = null;             // {kind, id}
+
+const SEED = [
+  ["Inbox", [
+    "Press ? to see everything the keyboard can do",
+    "Press c from anywhere to capture a thought",
+    "Drag the handle, or press Alt+Down, to reorder a line",
+    "Ask Priya for the venue quote"
+  ]],
+  ["Next actions", [
+    "Draft the Q3 budget email — 20 minutes",
+    "Book the dentist",
+    "Pick up dry cleaning"
+  ]],
+  ["Waiting for", [
+    "Priya — venue quote, asked Tuesday",
+    "Airline refund, filed 12 June"
+  ]],
+  ["Someday / maybe", [
+    "Learn to develop film at home",
+    "Cycle the Loire valley"
+  ]],
+  ["Projects", [
+    "Kitchen shelves — measure, buy, mount",
+    "Move the blog off Wordpress"
+  ]],
+  ["Reference", [
+    "Router admin — 192.168.1.1",
+    "Passport renewal takes six weeks"
+  ]]
+];
+
+function seed() {
+  const secs = [];
+  const tasks = [];
+  const sKeys = OrderKey.nBetween(null, null, SEED.length);
+  SEED.forEach(function (entry, i) {
+    const id = uid();
+    secs.push({ id: id, name: entry[0], order: sKeys[i], collapsed: false });
+    const tKeys = OrderKey.nBetween(null, null, entry[1].length);
+    entry[1].forEach(function (text, j) {
+      tasks.push({ id: uid(), sectionId: id, text: text, done: false, order: tKeys[j] });
+    });
+  });
+  return {
+    sections: secs,
+    tasks: tasks,
+    filter: "all",
+    captureDest: secs[0].id,
+    captureDraft: "",
+    cursor: { kind: "task", id: tasks[0].id }
+  };
+}
+
+function load() {
+  try {
+    const raw = localStorage.getItem(STORE);
+    if (!raw) return seed();
+    const s = JSON.parse(raw);
+    if (!Array.isArray(s.sections) || !Array.isArray(s.tasks)) return seed();
+    s.filter = ["all", "active", "done"].indexOf(s.filter) >= 0 ? s.filter : "all";
+    s.captureDraft = typeof s.captureDraft === "string" ? s.captureDraft : "";
+    if (!s.sections.some(x => x.id === s.captureDest)) {
+      s.captureDest = s.sections.length ? sorted(s.sections)[0].id : null;
+    }
+    s.cursor = s.cursor && s.cursor.id ? s.cursor : null;
+    return s;
+  } catch (err) {
+    console.warn("stored state unreadable, starting fresh:", err);
+    return seed();
+  }
+}
+
+function save() {
+  try {
+    localStorage.setItem(STORE, JSON.stringify({
+      sections: state.sections,
+      tasks: state.tasks,
+      filter: state.filter,
+      captureDest: state.captureDest,
+      captureDraft: state.captureDraft,
+      cursor: state.cursor
+    }));
+  } catch (err) {
+    console.warn("could not persist:", err);
+  }
+}
+
+/* ---------- reads ---------- */
+
+const byOrder = (a, b) => (a.order < b.order ? -1 : a.order > b.order ? 1 : 0);
+const sorted = list => list.slice().sort(byOrder);
+const sections = () => sorted(state.sections);
+const section = id => state.sections.find(s => s.id === id);
+const task = id => state.tasks.find(t => t.id === id);
+const allTasksIn = id => sorted(state.tasks.filter(t => t.sectionId === id));
+
+function passesFilter(t) {
+  return state.filter === "all" || (state.filter === "done" ? t.done : !t.done);
+}
+const tasksIn = id => allTasksIn(id).filter(passesFilter);
+
+/** Flat list of cursor stops, top to bottom: a section tab, then its visible tasks. */
+function rows() {
+  const out = [];
+  for (const s of sections()) {
+    out.push({ kind: "section", id: s.id });
+    if (!s.collapsed) for (const t of tasksIn(s.id)) out.push({ kind: "task", id: t.id });
+  }
+  return out;
+}
+
+function cursorRow() {
+  const list = rows();
+  if (!state.cursor) return list[0] || null;
+  const hit = list.find(r => r.kind === state.cursor.kind && r.id === state.cursor.id);
+  return hit || list[0] || null;
+}
+
+/** The section the cursor sits in — where n, s and Shift+Enter act. */
+function cursorSectionId() {
+  const r = cursorRow();
+  if (!r) return null;
+  return r.kind === "section" ? r.id : task(r.id).sectionId;
+}
+
+/* ---------- writes ---------- */
+
+function pushUndo() {
+  undoStack.push(JSON.stringify({ sections: state.sections, tasks: state.tasks }));
+  if (undoStack.length > 40) undoStack.shift();
+}
+
+function commit(opts) {
+  save();
+  render(opts);
+}
+
+function undo() {
+  const snap = undoStack.pop();
+  if (!snap) { toast("Nothing left to undo"); return; }
+  const prev = JSON.parse(snap);
+  state.sections = prev.sections;
+  state.tasks = prev.tasks;
+  if (!state.sections.some(s => s.id === state.captureDest)) {
+    state.captureDest = state.sections.length ? sections()[0].id : null;
+  }
+  hideToast();
+  commit({ focusCursor: true });
+}
+
+function addSection(afterId) {
+  pushUndo();
+  const list = sections();
+  const at = afterId ? list.findIndex(s => s.id === afterId) : list.length - 1;
+  const before = list[at] ? list[at].order : null;
+  const after = list[at + 1] ? list[at + 1].order : null;
+  const s = { id: uid(), name: "", collapsed: false, order: OrderKey.between(before, after) };
+  state.sections.push(s);
+  if (!state.captureDest) state.captureDest = s.id;
+  state.cursor = { kind: "section", id: s.id };
+  editing = { kind: "section", id: s.id, isNew: true };
+  commit();
+}
+
+function addTask(sectionId, afterTaskId, text) {
+  const s = section(sectionId);
+  if (!s) return null;
+  pushUndo();
+  if (s.collapsed) s.collapsed = false;
+  const list = allTasksIn(sectionId);
+  let before = null;
+  let after = list.length ? list[0].order : null;
+  if (afterTaskId) {
+    const at = list.findIndex(t => t.id === afterTaskId);
+    if (at >= 0) {
+      before = list[at].order;
+      after = list[at + 1] ? list[at + 1].order : null;
+    }
+  } else if (text === undefined) {
+    // Added by hand with no anchor: the end of the list is where you expect it.
+    before = list.length ? list[list.length - 1].order : null;
+    after = null;
+  }
+  const t = {
+    id: uid(),
+    sectionId: sectionId,
+    text: text === undefined ? "" : text,
+    done: false,
+    order: OrderKey.between(before, after)
+  };
+  state.tasks.push(t);
+  state.cursor = { kind: "task", id: t.id };
+  if (text === undefined) editing = { kind: "task", id: t.id, isNew: true };
+  return t;
+}
+
+function moveRow(dir) {
+  const r = cursorRow();
+  if (!r) return;
+
+  if (r.kind === "section") {
+    const list = sections();
+    const at = list.findIndex(s => s.id === r.id);
+    const to = at + dir;
+    if (to < 0 || to >= list.length) return;
+    pushUndo();
+    const a = dir > 0 ? list[to] : list[to - 1];
+    const b = dir > 0 ? list[to + 1] : list[to];
+    section(r.id).order = OrderKey.between(a ? a.order : null, b ? b.order : null);
+    commit({ focusCursor: true });
+    return;
+  }
+
+  // A task moves within its section first, then hops to the neighbouring one.
+  const t = task(r.id);
+  const list = tasksIn(t.sectionId);
+  const at = list.findIndex(x => x.id === t.id);
+  const to = at + dir;
+  if (to >= 0 && to < list.length) {
+    pushUndo();
+    const a = dir > 0 ? list[to] : list[to - 1];
+    const b = dir > 0 ? list[to + 1] : list[to];
+    t.order = OrderKey.between(a ? a.order : null, b ? b.order : null);
+    commit({ focusCursor: true });
+    return;
+  }
+  const secList = sections();
+  const si = secList.findIndex(s => s.id === t.sectionId);
+  const target = secList[si + dir];
+  if (!target) return;
+  pushUndo();
+  const into = allTasksIn(target.id);
+  t.sectionId = target.id;
+  t.order = dir > 0
+    ? OrderKey.between(null, into.length ? into[0].order : null)
+    : OrderKey.between(into.length ? into[into.length - 1].order : null, null);
+  if (target.collapsed) target.collapsed = false;
+  commit({ focusCursor: true });
+  toast("Moved to " + label(target));
+}
+
+function dropTask(taskId, targetSectionId, refTaskId, side) {
+  const t = task(taskId);
+  if (!t) return;
+  pushUndo();
+  const list = allTasksIn(targetSectionId).filter(x => x.id !== taskId);
+  let before = null;
+  let after = null;
+  if (refTaskId) {
+    const at = list.findIndex(x => x.id === refTaskId);
+    if (at >= 0) {
+      if (side === "before") {
+        before = list[at - 1] ? list[at - 1].order : null;
+        after = list[at].order;
+      } else {
+        before = list[at].order;
+        after = list[at + 1] ? list[at + 1].order : null;
+      }
+    }
+  } else {
+    before = list.length ? list[list.length - 1].order : null;
+  }
+  t.sectionId = targetSectionId;
+  t.order = OrderKey.between(before, after);
+  state.cursor = { kind: "task", id: t.id };
+  commit({ focusCursor: true });
+}
+
+function dropSection(sectionId, refSectionId, side) {
+  const list = sections().filter(s => s.id !== sectionId);
+  const at = list.findIndex(s => s.id === refSectionId);
+  if (at < 0) return;
+  pushUndo();
+  const before = side === "before" ? (list[at - 1] ? list[at - 1].order : null) : list[at].order;
+  const after = side === "before" ? list[at].order : (list[at + 1] ? list[at + 1].order : null);
+  section(sectionId).order = OrderKey.between(before, after);
+  commit({ focusCursor: true });
+}
+
+function toggleDone(id) {
+  const t = task(id);
+  if (!t) return;
+  pushUndo();
+  t.done = !t.done;
+  // Under a filter the row you just toggled leaves the view — keep the cursor
+  // where you were rather than snapping back to the top.
+  if (!passesFilter(t)) {
+    const list = rows();
+    const at = list.findIndex(r => r.kind === "task" && r.id === id);
+    const next = list[at + 1] || list[at - 1];
+    state.cursor = next ? { kind: next.kind, id: next.id } : null;
+  }
+  commit({ focusCursor: true });
+}
+
+function deleteTask(id) {
+  const t = task(id);
+  if (!t) return;
+  const list = rows();
+  const at = list.findIndex(r => r.kind === "task" && r.id === id);
+  const next = list[at + 1] || list[at - 1] || null;
+  pushUndo();
+  state.tasks = state.tasks.filter(x => x.id !== id);
+  state.cursor = next ? { kind: next.kind, id: next.id } : null;
+  commit({ focusCursor: true });
+  toast("Deleted " + quote(t.text || "an empty task"), true);
+}
+
+function deleteSection(id) {
+  const s = section(id);
+  if (!s) return;
+  const n = state.tasks.filter(t => t.sectionId === id).length;
+  pushUndo();
+  state.cursor = cursorAfterLosing("section", id);
+  state.sections = state.sections.filter(x => x.id !== id);
+  state.tasks = state.tasks.filter(t => t.sectionId !== id);
+  if (state.captureDest === id) state.captureDest = state.sections.length ? sections()[0].id : null;
+  commit({ focusCursor: true });
+  toast("Deleted " + quote(label(s)) + (n ? " and its " + n + (n === 1 ? " task" : " tasks") : ""), true);
+}
+
+/* ==========================================================================
+   3. Render
+   ========================================================================== */
+
+const el = id => document.getElementById(id);
+const column = el("column");
+
+const ENT = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+const esc = s => String(s).replace(/[&<>"']/g, c => ENT[c]);
+const label = s => (s.name || "").trim() || "Untitled section";
+const quote = s => "“" + s + "”";
+
+const ICON = {
+  add: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
+  pencil: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l10-10-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg>',
+  trash: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>',
+  move: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h11M4 16h11"/><path d="M17 5l4 3-4 3M17 13l4 3-4 3"/></svg>',
+  grip: '<svg viewBox="0 0 24 24" aria-hidden="true" style="stroke-width:2.5"><path d="M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01"/></svg>',
+  tick: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 13l4 4L19 7"/></svg>'
+};
+
+function iconBtn(act, title, svg, danger) {
+  return '<button class="icon' + (danger ? " is-danger" : "") + '" data-act="' + act + '" ' +
+         'title="' + esc(title) + '" aria-label="' + esc(title) + '">' + svg + '</button>';
+}
+
+function render(opts) {
+  opts = opts || {};
+
+  for (const b of el("filters").querySelectorAll("button")) {
+    b.setAttribute("aria-pressed", String(b.dataset.filter === state.filter));
+  }
+  const dest = section(state.captureDest);
+  el("dest-name").textContent = dest ? label(dest) : "no section";
+  el("capture-field").placeholder = dest ? "Capture a thought…" : "Add a section first, then capture";
+  el("capture-field").disabled = !dest;
+  el("dest-btn").disabled = !state.sections.length;
+  if (document.activeElement !== el("capture-field")) el("capture-field").value = state.captureDraft;
+
+  const list = sections();
+  if (!list.length) {
+    column.innerHTML =
+      '<div class="zero">' +
+        '<h2>Nothing filed yet</h2>' +
+        '<p>Sections are your lists &mdash; Inbox, Next actions, Waiting for, whatever fits how you work. ' +
+        'Tasks live inside them, one line each.</p>' +
+        '<div class="empty-row">' +
+          '<button class="btn" data-act="add-section">Add your first section</button>' +
+          '<span class="hint u-mono">or press <kbd>s</kbd></span>' +
+        '</div>' +
+      '</div>';
+    return;
+  }
+
+  const visible = list.reduce((n, s) => n + tasksIn(s.id).length, 0);
+  let html = "";
+
+  if (state.filter !== "all" && visible === 0 && state.tasks.length > 0) {
+    html +=
+      '<div class="notice">' +
+        '<span>Nothing matches the <strong>' + (state.filter === "done" ? "Done" : "Active") +
+        '</strong> filter. Your tasks are all still here.</span>' +
+        '<button class="btn btn-quiet u-mono" data-act="filter-all">Show all</button>' +
+      '</div>';
+  }
+
+  for (const s of list) {
+    const cur = state.cursor;
+    const holdsCursor = !!cur && (
+      (cur.kind === "section" && cur.id === s.id) ||
+      (cur.kind === "task" && task(cur.id) && task(cur.id).sectionId === s.id)
+    );
+    const editingName = !!editing && editing.kind === "section" && editing.id === s.id;
+
+    html += '<section class="sec' + (holdsCursor ? " is-cursor" : "") + '" data-sid="' + s.id + '">';
+    html += '<div class="tabline"><div class="tab-wrap">';
+    if (editingName) {
+      html += '<input class="tab-input" data-edit-section="' + s.id + '" value="' + esc(s.name) + '" ' +
+              'placeholder="Name this section" aria-label="Section name" maxlength="60">';
+    } else {
+      html += '<button class="tab" data-act="fold" aria-expanded="' + String(!s.collapsed) + '" ' +
+              'title="' + esc(label(s)) + (s.collapsed ? " — collapsed" : "") + '" draggable="true">' +
+                '<span class="chev" aria-hidden="true">' + (s.collapsed ? "▸" : "▾") + '</span>' +
+                '<span class="tab-name">' + esc(label(s)) + '</span>' +
+              '</button>';
+    }
+    html += '</div>';
+    html += '<div class="sec-tools">' +
+              iconBtn("add-task", "Add a task to " + label(s), ICON.add) +
+              iconBtn("rename", "Rename " + label(s), ICON.pencil) +
+              iconBtn("del-section", "Delete " + label(s), ICON.trash, true) +
+            '</div></div>';
+
+    if (!s.collapsed) {
+      const shown = tasksIn(s.id);
+      const hidden = allTasksIn(s.id).length - shown.length;
+      html += '<div class="card">';
+      if (shown.length) {
+        html += '<ul class="tasks">';
+        for (const t of shown) html += taskRow(t);
+        html += '</ul>';
+        html += '<button class="add-row" data-act="add-task">' +
+                  '<span class="plus" aria-hidden="true">+</span><span>Add a task</span>' +
+                '</button>';
+      } else if (hidden > 0) {
+        // No number here: the spec puts per-section task counts out of scope.
+        html += '<div class="empty">' +
+                  '<h3>' + (state.filter === "done" ? "Nothing done here yet" : "Everything here is done") + '</h3>' +
+                  '<p>Tasks in this section are hidden by the ' +
+                  (state.filter === "done" ? "Done" : "Active") + ' filter.</p>' +
+                  '<div class="empty-row">' +
+                    '<button class="btn btn-quiet u-mono" data-act="filter-all">Show all</button>' +
+                  '</div>' +
+                '</div>';
+      } else {
+        html += '<div class="empty">' +
+                  '<h3>Nothing filed here</h3>' +
+                  '<p>Add a line, or capture straight into this section from the bar above.</p>' +
+                  '<div class="empty-row">' +
+                    '<button class="btn" data-act="add-task">Add a task</button>' +
+                    '<button class="btn btn-quiet u-mono" data-act="set-dest">Capture here</button>' +
+                    '<span class="hint u-mono">or press <kbd>n</kbd></span>' +
+                  '</div>' +
+                '</div>';
+      }
+      html += '</div>';
+    }
+    html += '</section>';
+  }
+
+  column.innerHTML = html;
+  restoreFocus(opts);
+}
+
+function taskRow(t) {
+  const isCursor = !!state.cursor && state.cursor.kind === "task" && state.cursor.id === t.id;
+  const isEditing = !!editing && editing.kind === "task" && editing.id === t.id;
+  let h = '<li class="task' + (t.done ? " is-done" : "") + (isCursor ? " is-cursor" : "") +
+          '" data-tid="' + t.id + '" tabindex="-1">';
+  h += '<span class="grip" data-act="grip" draggable="true" title="Drag to reorder" aria-hidden="true">' +
+       ICON.grip + '</span>';
+  h += '<button class="box" data-act="toggle" role="checkbox" aria-checked="' + String(t.done) + '" ' +
+       'aria-label="' + (t.done ? "Mark not done" : "Mark done") + ': ' + esc(t.text || "empty task") + '">' +
+       ICON.tick + '</button>';
+  if (isEditing) {
+    h += '<input class="edit" data-edit-task="' + t.id + '" value="' + esc(t.text) + '" ' +
+         'placeholder="What is it?" aria-label="Task text">';
+  } else {
+    h += '<span class="text" data-act="edit">' + esc(t.text || "—") + '</span>';
+    h += '<span class="task-tools">' +
+           iconBtn("move", "Move to another section", ICON.move) +
+           iconBtn("del-task", "Delete this task", ICON.trash, true) +
+         '</span>';
+  }
+  return h + '</li>';
+}
+
+function restoreFocus(opts) {
+  if (editing) {
+    const input = column.querySelector("[data-edit-task], [data-edit-section]");
+    if (input) {
+      input.focus();
+      const at = input.value.length;
+      input.setSelectionRange(at, at);
+      return;
+    }
+  }
+  if (!opts.focusCursor) return;
+  const r = cursorRow();
+  if (!r) return;
+  state.cursor = { kind: r.kind, id: r.id };
+  const node = r.kind === "task"
+    ? column.querySelector('[data-tid="' + r.id + '"]')
+    : column.querySelector('[data-sid="' + r.id + '"] .tab');
+  if (node) {
+    node.focus({ preventScroll: true });
+    node.scrollIntoView({ block: "nearest" });
+  }
+}
+
+/* ==========================================================================
+   4. Inline editing
+   ========================================================================== */
+
+/** Where the cursor goes when the row it was on stops existing. Never nowhere:
+ *  landing back at the top of the list loses your place. */
+function cursorAfterLosing(kind, id) {
+  if (kind === "task") {
+    const t = task(id);
+    if (t) return { kind: "section", id: t.sectionId };
+    return null;
+  }
+  const list = sections();
+  const at = list.findIndex(s => s.id === id);
+  const near = list[at - 1] || list[at + 1];
+  return near ? { kind: "section", id: near.id } : null;
+}
+
+function startEdit(row) {
+  if (!row) return;
+  editing = { kind: row.kind, id: row.id, isNew: false };
+  state.cursor = { kind: row.kind, id: row.id };
+  render();
+}
+
+function commitEdit(input, stayPut) {
+  if (!editing) return;
+  const cur = editing;
+  const value = input.value.trim();
+  editing = null;
+
+  if (cur.kind === "task") {
+    const t = task(cur.id);
+    if (!t) { render({ focusCursor: true }); return; }
+    if (!value && cur.isNew) {          // never leave a blank line behind
+      state.cursor = cursorAfterLosing("task", cur.id);
+      state.tasks = state.tasks.filter(x => x.id !== cur.id);
+      commit({ focusCursor: true });
+      return;
+    }
+    if (value && value !== t.text) {
+      if (!cur.isNew) pushUndo();
+      t.text = value;
+    }
+  } else {
+    const s = section(cur.id);
+    if (!s) { render({ focusCursor: true }); return; }
+    if (!value && cur.isNew) {
+      state.cursor = cursorAfterLosing("section", cur.id);
+      state.sections = state.sections.filter(x => x.id !== cur.id);
+      if (state.captureDest === cur.id) {
+        state.captureDest = state.sections.length ? sections()[0].id : null;
+      }
+      commit({ focusCursor: true });
+      return;
+    }
+    if (value && value !== s.name) {
+      if (!cur.isNew) pushUndo();
+      s.name = value;
+    }
+  }
+  commit({ focusCursor: !stayPut });
+}
+
+function cancelEdit() {
+  if (!editing) return;
+  const cur = editing;
+  editing = null;
+  if (cur.isNew) {
+    state.cursor = cursorAfterLosing(cur.kind, cur.id);
+    if (cur.kind === "task") {
+      state.tasks = state.tasks.filter(x => x.id !== cur.id);
+    } else {
+      state.sections = state.sections.filter(x => x.id !== cur.id);
+      if (state.captureDest === cur.id) {
+        state.captureDest = state.sections.length ? sections()[0].id : null;
+      }
+    }
+    commit({ focusCursor: true });
+    return;
+  }
+  render({ focusCursor: true });
+}
+
+column.addEventListener("keydown", function (e) {
+  const input = e.target.closest("[data-edit-task], [data-edit-section]");
+  if (!input) return;
+  if (e.key === "Enter") {
+    e.preventDefault();
+    const wasNew = !!editing && editing.isNew;
+    const editedId = editing ? editing.id : null;
+    const sid = editing && editing.kind === "task" && task(editing.id) ? task(editing.id).sectionId : null;
+    commitEdit(input, wasNew && !!sid);
+    // Enter on a brand-new task opens the next one — typing a list stays typing.
+    if (wasNew && sid && task(editedId)) {
+      addTask(sid, editedId, undefined);
+      commit();
+    }
+    return;
+  }
+  if (e.key === "Escape") {
+    e.preventDefault();
+    e.stopPropagation();
+    cancelEdit();
+  }
+}, true);
+
+column.addEventListener("focusout", function (e) {
+  const input = e.target.closest("[data-edit-task], [data-edit-section]");
+  if (input && editing) commitEdit(input, true);
+});
+
+/* ==========================================================================
+   5. Pointer actions
+   ========================================================================== */
+
+column.addEventListener("click", function (e) {
+  const actor = e.target.closest("[data-act]");
+  const li = e.target.closest("[data-tid]");
+  const sec = e.target.closest("[data-sid]");
+  const sid = sec ? sec.dataset.sid : null;
+
+  if (!actor) {
+    if (li) {
+      state.cursor = { kind: "task", id: li.dataset.tid };
+      render({ focusCursor: true });
+    }
+    return;
+  }
+
+  switch (actor.dataset.act) {
+    case "add-section":
+      addSection(null);
+      return;
+    case "filter-all":
+      setFilter("all");
+      return;
+    case "set-dest":
+      state.captureDest = sid;
+      commit();
+      captureField.focus();
+      toast("Capturing into " + label(section(sid)));
+      return;
+    case "fold": {
+      const s = section(sid);
+      s.collapsed = !s.collapsed;
+      state.cursor = { kind: "section", id: sid };
+      commit({ focusCursor: true });
+      return;
+    }
+    case "rename":
+      startEdit({ kind: "section", id: sid });
+      return;
+    case "del-section":
+      askDeleteSection(sid);
+      return;
+    case "add-task":
+      addTask(sid, li ? li.dataset.tid : null, undefined);
+      commit();
+      return;
+    case "toggle":
+      toggleDone(li.dataset.tid);
+      return;
+    case "edit":
+      startEdit({ kind: "task", id: li.dataset.tid });
+      return;
+    case "move":
+      askMoveTask(li.dataset.tid);
+      return;
+    case "del-task":
+      deleteTask(li.dataset.tid);
+      return;
+  }
+});
+
+/* ---------- drag and drop ---------- */
+
+column.addEventListener("dragstart", function (e) {
+  const grip = e.target.closest('[data-act="grip"]');
+  const tab = e.target.closest(".tab");
+  if (grip) {
+    const li = grip.closest("[data-tid]");
+    drag = { kind: "task", id: li.dataset.tid };
+    e.dataTransfer.setDragImage(li, 12, li.offsetHeight / 2);
+  } else if (tab) {
+    drag = { kind: "section", id: tab.closest("[data-sid]").dataset.sid };
+    e.dataTransfer.setDragImage(tab, 12, tab.offsetHeight / 2);
+  } else {
+    return;
+  }
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("text/plain", drag.id);
+});
+
+column.addEventListener("dragover", function (e) {
+  if (!drag) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "move";
+  clearDropMarks();
+  if (drag.kind === "task") {
+    const li = e.target.closest("[data-tid]");
+    if (li) {
+      const r = li.getBoundingClientRect();
+      li.dataset.drop = e.clientY < r.top + r.height / 2 ? "before" : "after";
+      return;
+    }
+    const sec = e.target.closest("[data-sid]");
+    if (sec) sec.dataset.hover = "1";
+    return;
+  }
+  const sec = e.target.closest("[data-sid]");
+  if (sec && sec.dataset.sid !== drag.id) {
+    const r = sec.getBoundingClientRect();
+    sec.dataset.drop = e.clientY < r.top + r.height / 2 ? "before" : "after";
+  }
+});
+
+column.addEventListener("drop", function (e) {
+  if (!drag) return;
+  e.preventDefault();
+  const marked = column.querySelector("[data-drop]");
+  const side = marked ? marked.dataset.drop : null;
+  if (drag.kind === "task") {
+    if (marked && marked.dataset.tid) {
+      dropTask(drag.id, marked.closest("[data-sid]").dataset.sid, marked.dataset.tid, side);
+    } else {
+      const sec = e.target.closest("[data-sid]");
+      if (sec) dropTask(drag.id, sec.dataset.sid, null, "after");
+    }
+  } else if (marked && marked.dataset.sid) {
+    dropSection(drag.id, marked.dataset.sid, side);
+  }
+  drag = null;
+  clearDropMarks();
+});
+
+column.addEventListener("dragend", function () { drag = null; clearDropMarks(); });
+column.addEventListener("dragleave", function (e) {
+  if (!column.contains(e.relatedTarget)) clearDropMarks();
+});
+
+function clearDropMarks() {
+  for (const n of column.querySelectorAll("[data-drop]")) delete n.dataset.drop;
+  for (const n of column.querySelectorAll("[data-hover]")) delete n.dataset.hover;
+}
+
+/* ==========================================================================
+   6. Capture
+   Always one keystroke away. Enter files the line at the top of the capture
+   section and leaves the field focused and empty, so a burst of thoughts is
+   one continuous action. Shift+Enter files into the section you are looking
+   at instead. A lone ">" opens the destination picker.
+   ========================================================================== */
+
+const captureField = el("capture-field");
+
+el("capture-form").addEventListener("submit", e => e.preventDefault());
+
+captureField.addEventListener("input", function () {
+  if (captureField.value === ">") {
+    captureField.value = "";
+    state.captureDraft = "";
+    save();
+    pickSection("File captures into", function (id) {
+      state.captureDest = id;
+      commit();
+      captureField.focus();
+    });
+    return;
+  }
+  state.captureDraft = captureField.value;
+  save();
+});
+
+captureField.addEventListener("keydown", function (e) {
+  if (e.key === "Escape") {
+    e.preventDefault();
+    captureField.blur();
+    render({ focusCursor: true });
+    return;
+  }
+  if (e.key !== "Enter") return;
+  e.preventDefault();
+  const text = captureField.value.trim();
+  if (!text) return;
+  const targetId = e.shiftKey ? (cursorSectionId() || state.captureDest) : state.captureDest;
+  const s = section(targetId);
+  if (!s) { toast("Add a section first"); return; }
+  const t = addTask(targetId, null, text);
+  captureField.value = "";
+  state.captureDraft = "";
+  commit();
+  captureField.focus();
+  if (t) flash(t.id);
+  toast("Captured to " + label(s), true);
+});
+
+el("dest-btn").addEventListener("click", function () {
+  pickSection("File captures into", function (id) {
+    state.captureDest = id;
+    commit();
+    captureField.focus();
+  });
+});
+
+/* ==========================================================================
+   7. Filters
+   ========================================================================== */
+
+function setFilter(f) {
+  state.filter = f;
+  commit({ focusCursor: document.activeElement === document.body });
+}
+
+el("filters").addEventListener("click", function (e) {
+  const b = e.target.closest("[data-filter]");
+  if (b) setFilter(b.dataset.filter);
+});
+
+/* ==========================================================================
+   8. Dialogs — search, picker, confirm, help
+   Each is a native <dialog> opened with showModal(), which makes the page
+   behind it inert and keeps Tab inside. The scroll root is locked too, so the
+   background cannot be scrolled while a dialog is up.
+   ========================================================================== */
+
+let openDialog = null;
+
+function show(dlg) {
+  if (openDialog) hide();
+  openDialog = dlg;
+  document.documentElement.classList.add("is-locked");
+  dlg.showModal();
+}
+
+function hide() {
+  if (!openDialog) return;
+  const d = openDialog;
+  openDialog = null;
+  document.documentElement.classList.remove("is-locked");
+  if (d.open) d.close();
+}
+
+for (const d of document.querySelectorAll("dialog")) {
+  d.addEventListener("close", function () {
+    if (openDialog === d) {
+      openDialog = null;
+      document.documentElement.classList.remove("is-locked");
+    }
+  });
+  d.addEventListener("click", function (e) { if (e.target === d) hide(); });
+}
+
+/* ---------- search ---------- */
+
+const searchDialog = el("search-dialog");
+const searchField = el("search-field");
+const searchResults = el("search-results");
+let searchHits = [];
+let searchAt = 0;
+
+function openSearch() {
+  searchField.value = "";
+  searchAt = 0;
+  drawSearch();
+  show(searchDialog);
+  searchField.focus();
+}
+
+const terms = q => q.toLowerCase().split(/\s+/).filter(Boolean);
+
+function findTasks(q) {
+  const ts = terms(q);
+  const out = [];
+  for (const s of sections()) {
+    for (const t of allTasksIn(s.id)) {
+      const text = t.text.toLowerCase();
+      if (ts.every(w => text.indexOf(w) >= 0)) out.push({ task: t, section: s });
+    }
+  }
+  return out;
+}
+
+function highlight(text, q) {
+  const first = terms(q)[0];
+  if (!first) return esc(text);
+  const at = text.toLowerCase().indexOf(first);
+  if (at < 0) return esc(text);
+  return esc(text.slice(0, at)) + "<mark>" + esc(text.slice(at, at + first.length)) +
+         "</mark>" + esc(text.slice(at + first.length));
+}
+
+function drawSearch() {
+  const q = searchField.value.trim();
+  searchHits = q ? findTasks(q) : [];
+  if (searchAt >= searchHits.length) searchAt = 0;
+
+  if (!q) {
+    searchResults.innerHTML =
+      '<li><div class="empty empty-tight">' +
+        '<h3>Search every section</h3>' +
+        '<p>Type any words from a task. Every word has to appear, in any order. ' +
+        'Picking a result takes you straight to that task.</p>' +
+      '</div></li>';
+    return;
+  }
+  if (!searchHits.length) {
+    searchResults.innerHTML =
+      '<li><div class="empty empty-tight">' +
+        '<h3>No task matches ' + esc(quote(q)) + '</h3>' +
+        '<p>Try fewer words &mdash; or file it as a new task instead.</p>' +
+        '<div class="empty-row">' +
+          '<button class="btn" id="search-capture">Capture ' + esc(quote(q)) + '</button>' +
+        '</div>' +
+      '</div></li>';
+    return;
+  }
+  searchResults.innerHTML = searchHits.map(function (h, i) {
+    return '<li><button class="result' + (i === searchAt ? " is-on" : "") +
+           (h.task.done ? " is-done" : "") + '" data-i="' + i + '">' +
+             '<span class="result-where u-mono">' + esc(label(h.section)) + '</span>' +
+             '<span class="result-what">' + highlight(h.task.text, q) + '</span>' +
+           '</button></li>';
+  }).join("");
+}
+
+function gotoHit(i) {
+  const hit = searchHits[i];
+  if (!hit) return;
+  hide();
+  // A result you cannot see is not an answer — clear whatever is hiding it.
+  if (!passesFilter(hit.task)) state.filter = "all";
+  if (hit.section.collapsed) hit.section.collapsed = false;
+  state.cursor = { kind: "task", id: hit.task.id };
+  commit({ focusCursor: true });
+  flash(hit.task.id);
+}
+
+searchField.addEventListener("input", function () { searchAt = 0; drawSearch(); });
+
+searchField.addEventListener("keydown", function (e) {
+  if (e.key === "ArrowDown" || (e.ctrlKey && e.key === "n")) {
+    e.preventDefault();
+    if (searchHits.length) { searchAt = (searchAt + 1) % searchHits.length; drawSearch(); }
+  } else if (e.key === "ArrowUp" || (e.ctrlKey && e.key === "p")) {
+    e.preventDefault();
+    if (searchHits.length) { searchAt = (searchAt - 1 + searchHits.length) % searchHits.length; drawSearch(); }
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    if (searchHits.length) gotoHit(searchAt);
+    else captureFromSearch();
+  }
+});
+
+searchResults.addEventListener("click", function (e) {
+  const r = e.target.closest("[data-i]");
+  if (r) { gotoHit(Number(r.dataset.i)); return; }
+  if (e.target.closest("#search-capture")) captureFromSearch();
+});
+
+function captureFromSearch() {
+  const text = searchField.value.trim();
+  const s = section(state.captureDest);
+  if (!text || !s) return;
+  hide();
+  const t = addTask(s.id, null, text);
+  state.cursor = { kind: "task", id: t.id };
+  commit({ focusCursor: true });
+  flash(t.id);
+  toast("Captured to " + label(s), true);
+}
+
+el("search-btn").addEventListener("click", openSearch);
+
+/* ---------- section picker ---------- */
+
+const pickerDialog = el("picker-dialog");
+const pickerField = el("picker-field");
+const pickerResults = el("picker-results");
+let pickerItems = [];
+let pickerAt = 0;
+let pickerDone = null;
+
+function pickSection(title, onPick, excludeId) {
+  if (!state.sections.length) { toast("Add a section first"); return; }
+  el("picker-title").textContent = title;
+  pickerDone = onPick;
+  pickerField.value = "";
+  pickerAt = 0;
+  pickerItems = sections().filter(s => s.id !== excludeId).map(s => ({ id: s.id, name: label(s) }));
+  drawPicker();
+  show(pickerDialog);
+  pickerField.focus();
+}
+
+function visibleItems() {
+  const q = pickerField.value.trim().toLowerCase();
+  return pickerItems.filter(it => !q || it.name.toLowerCase().indexOf(q) >= 0);
+}
+
+function drawPicker() {
+  const items = visibleItems();
+  if (pickerAt >= items.length) pickerAt = 0;
+  if (!items.length) {
+    pickerResults.innerHTML =
+      '<li><div class="empty empty-tight"><p>No section matches that. Clear the filter to see them all.</p></div></li>';
+    return;
+  }
+  pickerResults.innerHTML = items.map(function (it, i) {
+    return '<li><button class="result' + (i === pickerAt ? " is-on" : "") + '" data-id="' + it.id + '">' +
+             '<span class="result-where u-mono">' + (i < 9 ? i + 1 : "&nbsp;") + '</span>' +
+             '<span class="result-what">' + esc(it.name) + '</span>' +
+           '</button></li>';
+  }).join("");
+}
+
+pickerField.addEventListener("input", function () { pickerAt = 0; drawPicker(); });
+
+pickerField.addEventListener("keydown", function (e) {
+  const items = visibleItems();
+  if (!items.length && e.key !== "Enter") return;
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    pickerAt = (pickerAt + 1) % items.length;
+    drawPicker();
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    pickerAt = (pickerAt - 1 + items.length) % items.length;
+    drawPicker();
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    if (items[pickerAt]) choose(items[pickerAt].id);
+  } else if (/^[1-9]$/.test(e.key) && !pickerField.value) {
+    e.preventDefault();
+    const it = items[Number(e.key) - 1];
+    if (it) choose(it.id);
+  }
+});
+
+pickerResults.addEventListener("click", function (e) {
+  const b = e.target.closest("[data-id]");
+  if (b) choose(b.dataset.id);
+});
+
+function choose(id) {
+  const done = pickerDone;
+  pickerDone = null;
+  hide();
+  if (done) done(id);
+}
+
+function askMoveTask(taskId) {
+  const t = task(taskId);
+  if (!t) return;
+  pickSection("Move this task to", function (targetId) {
+    pushUndo();
+    const into = allTasksIn(targetId);
+    t.sectionId = targetId;
+    t.order = OrderKey.between(into.length ? into[into.length - 1].order : null, null);
+    const s = section(targetId);
+    if (s.collapsed) s.collapsed = false;
+    state.cursor = { kind: "task", id: t.id };
+    commit({ focusCursor: true });
+    flash(t.id);
+    toast("Moved to " + label(s), true);
+  }, t.sectionId);
+}
+
+/* ---------- confirm ---------- */
+
+let confirmDone = null;
+
+function askDeleteSection(sid) {
+  const s = section(sid);
+  if (!s) return;
+  const n = state.tasks.filter(t => t.sectionId === sid).length;
+  el("confirm-title").textContent = "Delete section";
+  el("confirm-msg").textContent = "Delete " + quote(label(s)) +
+    (n ? " and the " + n + (n === 1 ? " task" : " tasks") + " in it?" : "?");
+  el("confirm-sub").textContent = n
+    ? "Deleting a section deletes its tasks. You can undo this straight after."
+    : "You can undo this straight after.";
+  el("confirm-yes").textContent = n ? "Delete " + n + (n === 1 ? " task" : " tasks") : "Delete section";
+  confirmDone = function () { deleteSection(sid); };
+  show(el("confirm-dialog"));
+  el("confirm-no").focus();
+}
+
+function askReset() {
+  el("confirm-title").textContent = "Reset to first run";
+  el("confirm-msg").textContent = "Replace everything with the starting sections and tasks?";
+  el("confirm-sub").textContent = "Your current sections and tasks are deleted. This one cannot be undone.";
+  el("confirm-yes").textContent = "Reset everything";
+  confirmDone = function () {
+    localStorage.removeItem(STORE);
+    state = seed();
+    undoStack = [];
+    editing = null;
+    commit({ focusCursor: true });
+    toast("Back to the first-run set");
+  };
+  show(el("confirm-dialog"));
+  el("confirm-no").focus();
+}
+
+el("confirm-yes").addEventListener("click", function () {
+  const done = confirmDone;
+  confirmDone = null;
+  hide();
+  if (done) done();
+});
+el("confirm-no").addEventListener("click", function () {
+  confirmDone = null;
+  hide();
+});
+el("reset-btn").addEventListener("click", askReset);
+
+/* ---------- help ---------- */
+
+el("help-btn").addEventListener("click", function () {
+  show(el("help-dialog"));
+  el("help-close").focus();
+});
+el("help-close").addEventListener("click", hide);
+
+/* ==========================================================================
+   9. Toast and flash
+   ========================================================================== */
+
+function toast(msg, undoable) {
+  el("toast-msg").textContent = msg;
+  el("toast-undo").hidden = !undoable || !undoStack.length;
+  el("toast").classList.add("is-up");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(hideToast, undoable ? 9000 : 3500);
+}
+
+function hideToast() {
+  clearTimeout(toastTimer);
+  el("toast").classList.remove("is-up");
+}
+
+el("toast-undo").addEventListener("click", undo);
+
+function flash(taskId) {
+  const node = column.querySelector('[data-tid="' + taskId + '"]');
+  if (!node) return;
+  node.classList.add("is-flash");
+  node.scrollIntoView({ block: "nearest" });
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(function () { node.classList.remove("is-flash"); }, 900);
+}
+
+/* ==========================================================================
+   10. Keyboard
+   Everything the mouse can do, the keyboard can do. Shortcuts stand down
+   inside any text field and while a dialog is open.
+   ========================================================================== */
+
+document.addEventListener("keydown", function (e) {
+  const typing = e.target.matches("input, textarea, [contenteditable]");
+
+  if (openDialog) {
+    if (e.key === "Escape") { e.preventDefault(); hide(); }
+    return;
+  }
+
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    openSearch();
+    return;
+  }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z" && !typing) {
+    e.preventDefault();
+    undo();
+    return;
+  }
+
+  const nudge = e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown");
+  if (nudge) {
+    e.preventDefault();
+    moveRow(e.key === "ArrowDown" ? 1 : -1);
+    return;
+  }
+
+  if (typing || e.ctrlKey || e.metaKey || e.altKey) {
+    if (e.key === "Escape" && !typing && el("toast").classList.contains("is-up")) hideToast();
+    return;
+  }
+
+  switch (e.key) {
+    case "Escape":
+      if (el("toast").classList.contains("is-up")) hideToast();
+      return;
+    case "c":
+      e.preventDefault();
+      captureField.focus();
+      captureField.select();
+      return;
+    case "/":
+      e.preventDefault();
+      openSearch();
+      return;
+    case "?":
+      e.preventDefault();
+      show(el("help-dialog"));
+      el("help-close").focus();
+      return;
+    case "1": e.preventDefault(); setFilter("all"); return;
+    case "2": e.preventDefault(); setFilter("active"); return;
+    case "3": e.preventDefault(); setFilter("done"); return;
+    case "j": case "ArrowDown": e.preventDefault(); step(1); return;
+    case "k": case "ArrowUp": e.preventDefault(); step(-1); return;
+    case "g": {
+      e.preventDefault();
+      const now = Date.now();
+      if (now - lastG < 600) { jump("first"); lastG = 0; } else lastG = now;
+      return;
+    }
+    case "G": e.preventDefault(); jump("last"); return;
+    case "s": e.preventDefault(); addSection(cursorSectionId()); return;
+  }
+
+  const r = cursorRow();
+  if (!r) return;
+
+  switch (e.key) {
+    case "Enter":
+      e.preventDefault();
+      startEdit(r);
+      return;
+    case "n": {
+      e.preventDefault();
+      const sid = cursorSectionId();
+      if (!sid) { toast("Add a section first"); return; }
+      addTask(sid, r.kind === "task" ? r.id : null, undefined);
+      commit();
+      return;
+    }
+    case "z": case "ArrowLeft": case "ArrowRight": {
+      e.preventDefault();
+      const s = section(cursorSectionId());
+      if (!s) return;
+      s.collapsed = e.key === "ArrowLeft" ? true : e.key === "ArrowRight" ? false : !s.collapsed;
+      if (s.collapsed) state.cursor = { kind: "section", id: s.id };
+      commit({ focusCursor: true });
+      return;
+    }
+    case "x": case " ":
+      if (e.target.closest("button")) return;   // let the button's own click run
+      if (r.kind !== "task") return;
+      e.preventDefault();
+      toggleDone(r.id);
+      return;
+    case "m":
+      if (r.kind !== "task") return;
+      e.preventDefault();
+      askMoveTask(r.id);
+      return;
+    case "Delete": case "Backspace":
+      e.preventDefault();
+      if (r.kind === "task") deleteTask(r.id);
+      else askDeleteSection(r.id);
+      return;
+  }
+});
+
+function step(dir) {
+  const list = rows();
+  if (!list.length) return;
+  const cur = cursorRow();
+  let at = cur ? list.findIndex(x => x.kind === cur.kind && x.id === cur.id) : -1;
+  at = Math.max(0, Math.min(list.length - 1, at + dir));
+  state.cursor = { kind: list[at].kind, id: list[at].id };
+  commit({ focusCursor: true });
+}
+
+function jump(where) {
+  const list = rows();
+  if (!list.length) return;
+  const r = where === "first" ? list[0] : list[list.length - 1];
+  state.cursor = { kind: r.kind, id: r.id };
+  commit({ focusCursor: true });
+}
+
+/* ==========================================================================
+   11. Go
+   ========================================================================== */
+
+state = load();
+save();          // first run writes itself down straight away — nothing is lost
+render();
+if (state.captureDraft) captureField.focus();
+</script>

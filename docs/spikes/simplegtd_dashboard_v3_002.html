@@ -1,0 +1,2362 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light">
+<title>SimpleGTD</title>
+
+<!--
+  SimpleGTD — working prototype, spike v3.002
+  Built from docs/simplegtd_spec_v3_004.md. Single file, zero network calls.
+
+  NON-NEGOTIABLES (spec §Non-negotiables was a placeholder; this is the fill)
+    1. Capture never blocks. One keystroke from anywhere, and it never loses
+       what you typed — the draft survives a reload.
+    2. Nothing disappears silently. Every delete is confirmed or undoable,
+       and every change is written to storage as it happens.
+    3. Every action has a keyboard path, and focus is always visible.
+    4. Reload puts you back where you were — same filter, same open sections,
+       same cursor.
+    5. One line, one task. No fields creep in.
+
+  CAPTURE (spec §Capture was a placeholder; this is the fill)
+    A sticky bar at the top of the drawer, focused with C from anywhere.
+    It files one line into a target section you pick with Alt+Up/Down.
+    Pasting several lines files them all. The target and the unsent draft
+    both persist.
+
+  DESIGN DIRECTION — "Drawer"
+    Sections are hanging-file tabs in a paper drawer. Cool grey stock,
+    deep label-tape green. Mono is the label layer (tabs, filters, hints);
+    sans is the human layer (task text). System faces only, so the file
+    opens with no network.
+-->
+
+<style>
+/* ─────────────────────────────────────────────────────────────────────────
+   TOKENS
+   Contrast is stated in the response that shipped this file; every pair
+   below clears WCAG AA with margin and most clear AAA.
+   ───────────────────────────────────────────────────────────────────── */
+:root {
+  --paper:    #E7EBEE;  /* drawer floor            */
+  --card:     #FCFDFE;  /* folder body             */
+  --card-2:   #EFF3F6;  /* row hover               */
+  --sel:      #E3EDEA;  /* row under the cursor    */
+  --ink:      #101519;  /* primary text  18.0:1 on card */
+  --ink-2:    #43535F;  /* secondary     7.82:1 on card */
+  --ink-3:    #5E6C78;  /* placeholder   5.31:1 on card */
+  --hair:     #B4BFC9;  /* decorative rules        */
+  --edge:     #74808B;  /* control borders 3.96:1 on card, 3.36:1 on paper */
+  --tape:     #0E4A42;  /* label tape / accent     */
+  --tape-2:   #146055;  /* tape hover              */
+  --tape-ink: #F2F7F5;  /* text on tape  9.34:1    */
+  --flag:     #9E1420;  /* destructive   8.01:1 on card */
+  --flag-2:   #7E101A;
+
+  --mono: ui-monospace, "Cascadia Mono", "SFMono-Regular", "SF Mono", Menlo,
+          Consolas, "Liberation Mono", monospace;
+  --sans: ui-sans-serif, system-ui, "Segoe UI Variable Text", "Segoe UI",
+          -apple-system, Roboto, "Helvetica Neue", Arial, sans-serif;
+
+  --r-card: 10px;
+  --r-tab: 7px;
+  --shadow-1: 0 1px 2px rgba(16, 21, 25, .06);
+  --shadow-2: 0 2px 4px rgba(16, 21, 25, .08), 0 8px 24px rgba(16, 21, 25, .10);
+  --shadow-3: 0 8px 16px rgba(16, 21, 25, .14), 0 32px 64px rgba(16, 21, 25, .22);
+  --col: 780px;
+}
+
+/* ── reset ───────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; }
+dialog { margin: auto; }   /* the reset above would strand modals top-left */
+html {
+  scrollbar-gutter: stable;
+  -webkit-text-size-adjust: 100%;
+  scroll-behavior: smooth;
+}
+html.is-locked { overflow: hidden; }
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font: 400 16px/1.5 var(--sans);
+  min-height: 100dvh;
+  padding: 0 0 96px;
+}
+button, input, select { font: inherit; color: inherit; }
+button { background: none; border: 0; cursor: pointer; text-align: left; }
+ul, ol { list-style: none; padding: 0; }
+h1, h2, h3, p { font-weight: inherit; font-size: inherit; }
+:focus { outline: none; }
+:focus-visible,
+.focus-ring:focus {
+  outline: 2px solid var(--tape);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.on-tape:focus-visible { outline-color: var(--tape-ink); }
+::selection { background: var(--sel); color: var(--ink); }
+
+.skip {
+  position: absolute; left: -9999px; top: 8px; z-index: 90;
+  background: var(--tape); color: var(--tape-ink);
+  padding: 10px 16px; border-radius: 6px;
+  font: 600 13px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase;
+  text-decoration: none;
+}
+.skip:focus { left: 16px; }
+.sr {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip-path: inset(50%); white-space: nowrap;
+}
+
+/* ── shared label type ───────────────────────────────────────────────── */
+.label {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .13em;
+  text-transform: uppercase;
+}
+
+/* ── icon buttons: 34×34 hit area, clears the 24px floor with margin ─── */
+.icon-btn {
+  display: inline-grid; place-items: center;
+  width: 34px; height: 34px;
+  border-radius: 7px;
+  color: var(--ink-2);
+  flex: none;
+  transition: background-color .12s ease, color .12s ease;
+}
+.icon-btn svg { width: 17px; height: 17px; display: block; }
+.icon-btn:hover { background: var(--card-2); color: var(--ink); }
+.icon-btn.danger:hover { background: #F6E4E6; color: var(--flag-2); }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   TOP BAR — masthead + capture, stuck together
+   ───────────────────────────────────────────────────────────────────── */
+.topbar {
+  position: sticky; top: 0; z-index: 30;
+  background: linear-gradient(var(--paper) 78%, rgba(231, 235, 238, 0));
+  padding: 0 0 12px;
+}
+.topbar::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: 12px; height: 1px;
+  background: var(--hair); opacity: 0;
+  transition: opacity .18s ease;
+}
+.topbar.is-stuck::after { opacity: 1; }
+
+.masthead {
+  max-width: var(--col);
+  margin-inline: auto;
+  padding: 14px 20px 10px;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 14px; flex-wrap: wrap;
+}
+.brand { display: flex; align-items: center; gap: 9px; flex: none; }
+.brand svg { width: 20px; height: 20px; color: var(--tape); display: block; }
+.brand h1 {
+  font-family: var(--mono);
+  font-size: 15px; font-weight: 700;
+  letter-spacing: .16em; text-transform: uppercase;
+  color: var(--ink);
+}
+.masthead-tools { display: flex; align-items: center; gap: 8px; }
+
+.search-btn {
+  display: flex; align-items: center; gap: 8px;
+  height: 34px; padding: 0 10px 0 9px;
+  border: 1px solid var(--edge); border-radius: 7px;
+  background: var(--card);
+  color: var(--ink-2);
+  font-size: 13px;
+  transition: border-color .12s ease, color .12s ease, background-color .12s ease;
+}
+.search-btn svg { width: 15px; height: 15px; flex: none; }
+.search-btn:hover { border-color: var(--tape); color: var(--ink); }
+.search-btn .kbd { display: none; }
+@media (min-width: 620px) { .search-btn .kbd { display: inline-flex; } }
+
+.kbd {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 20px; height: 20px; padding: 0 5px;
+  border: 1px solid var(--edge); border-bottom-width: 2px; border-radius: 4px;
+  background: var(--card);
+  font: 600 11px/1 var(--mono); letter-spacing: .04em;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+/* filters ─ segmented, mono, uppercase */
+.filters {
+  display: flex; align-items: center;
+  border: 1px solid var(--edge); border-radius: 7px;
+  background: var(--card);
+  overflow: hidden;
+}
+.filters button {
+  height: 32px; padding: 0 11px;
+  color: var(--ink-2);
+  font-family: var(--mono); font-size: 11px; font-weight: 700;
+  letter-spacing: .11em; text-transform: uppercase;
+  transition: background-color .12s ease, color .12s ease;
+}
+.filters button + button { border-inline-start: 1px solid var(--hair); }
+.filters button:hover { background: var(--card-2); color: var(--ink); }
+.filters button[aria-pressed="true"] {
+  background: var(--tape); color: var(--tape-ink);
+}
+.filters button[aria-pressed="true"]:hover { background: var(--tape-2); }
+.filters button:focus-visible { outline-offset: -3px; }
+.filters button[aria-pressed="true"]:focus-visible { outline-color: var(--tape-ink); }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   CAPTURE — the hero
+   ───────────────────────────────────────────────────────────────────── */
+.capture {
+  max-width: var(--col);
+  margin-inline: auto;
+  padding: 0 20px;
+}
+.capture-form {
+  display: flex; align-items: center; gap: 0;
+  background: var(--card);
+  border: 1.5px solid var(--edge);
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow-1);
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.capture-form:focus-within {
+  border-color: var(--tape);
+  box-shadow: 0 0 0 3px rgba(14, 74, 66, .13), var(--shadow-1);
+}
+.capture-caret {
+  flex: none;
+  padding: 0 2px 0 15px;
+  color: var(--tape);
+  font: 700 15px/1 var(--mono);
+  transition: transform .18s ease;
+}
+.capture-form:focus-within .capture-caret { transform: translateX(2px); }
+#capture-input {
+  flex: 1 1 auto; min-width: 0;
+  height: 54px; padding: 0 10px;
+  border: 0; background: none;
+  font-size: 16.5px;
+}
+#capture-input::placeholder { color: var(--ink-3); }
+#capture-input:focus { outline: none; }
+
+.capture-target {
+  flex: none; position: relative;
+  display: flex; align-items: center;
+}
+.capture-target::before {
+  content: "→"; position: absolute; left: 9px;
+  color: var(--ink-2); font: 400 13px/1 var(--mono); pointer-events: none;
+}
+.capture-target::after {
+  content: ""; position: absolute; right: 10px;
+  width: 0; height: 0; pointer-events: none;
+  border: 4px solid transparent; border-top-color: var(--ink-2);
+  transform: translateY(2px);
+}
+#capture-target-select {
+  appearance: none; -webkit-appearance: none;
+  height: 34px; max-width: 148px;
+  padding: 0 22px 0 25px;
+  border: 1px solid var(--edge); border-radius: 7px;
+  background: var(--card); color: var(--ink);
+  font-family: var(--mono); font-size: 11.5px; font-weight: 700;
+  letter-spacing: .1em; text-transform: uppercase;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: border-color .12s ease, background-color .12s ease;
+}
+#capture-target-select:hover { border-color: var(--tape); background: var(--card-2); }
+
+.capture-file {
+  flex: none;
+  display: flex; align-items: center; gap: 7px;
+  height: 40px; padding: 0 14px;
+  border-radius: 7px;
+  background: var(--tape); color: var(--tape-ink);
+  font-family: var(--mono); font-size: 11.5px; font-weight: 700;
+  letter-spacing: .11em; text-transform: uppercase;
+  transition: background-color .12s ease;
+}
+.capture-file:hover { background: var(--tape-2); }
+.capture-file:active { transform: translateY(1px); }
+.capture-file svg { width: 14px; height: 14px; }
+.capture-tail { display: flex; align-items: center; gap: 8px; padding: 0 7px 0 0; }
+
+.capture-hint {
+  display: none;
+  padding: 7px 4px 0 15px;
+  color: var(--ink-2);
+  font-family: var(--mono); font-size: 11.5px; letter-spacing: .03em;
+}
+.capture-hint b { color: var(--ink); font-weight: 700; }
+@media (min-width: 700px) { .capture-hint { display: block; } }
+
+/* the caret throws the line down the drawer — the signature moment.
+   Deliberately not animating the input itself: clearing it late would eat
+   keystrokes from anyone who keeps typing. */
+@keyframes caret-throw {
+  0%   { transform: translateX(2px); opacity: 1; }
+  45%  { transform: translateX(22px); opacity: 0; }
+  46%  { transform: translateX(-10px); opacity: 0; }
+  100% { transform: translateX(2px); opacity: 1; }
+}
+.capture-form.is-filing .capture-caret { animation: caret-throw .34s cubic-bezier(.4, 0, .2, 1); }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   DRAWER — a single vertical column of folders
+   ───────────────────────────────────────────────────────────────────── */
+.drawer {
+  max-width: var(--col);
+  margin-inline: auto;
+  padding: 16px 20px 0;
+  display: flex; flex-direction: column; gap: 22px;
+}
+
+/* ── folder = tab row + card ──────────────────────────────────────────── */
+.folder { display: flex; flex-direction: column; scroll-margin-top: 150px; }
+.tab-row {
+  display: flex; align-items: flex-end; gap: 6px;
+  padding: 0 0 0 14px;
+}
+.tab {
+  position: relative;
+  display: flex; align-items: center; gap: 7px;
+  min-height: 30px; padding: 5px 13px 6px;
+  border-radius: var(--r-tab) var(--r-tab) 0 0;
+  background: var(--tape); color: var(--tape-ink);
+  max-width: min(100%, 420px);
+  transition: background-color .12s ease;
+}
+.tab:hover { background: var(--tape-2); }
+/* the keyboard cursor on a tab, so it reads even when focus rings are off */
+.folder.is-cursor .tab { background: var(--tape-2); box-shadow: inset 0 0 0 2px var(--tape-ink); }
+/* covers the card's top border under the tab, so they read as one object */
+.tab::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px;
+  background: inherit;
+}
+.tab svg.chev {
+  width: 13px; height: 13px; flex: none;
+  transition: transform .18s ease;
+}
+.folder.is-collapsed .tab svg.chev { transform: rotate(-90deg); }
+.tab-name {
+  font-family: var(--mono); font-size: 12.5px; font-weight: 700;
+  letter-spacing: .13em; text-transform: uppercase;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  min-width: 0;
+}
+.tab-rename {
+  height: 26px; min-width: 0; width: 100%;
+  padding: 0 6px;
+  border: 0; border-radius: 4px;
+  background: var(--tape-ink); color: var(--ink);
+  font-family: var(--mono); font-size: 12.5px; font-weight: 700;
+  letter-spacing: .13em; text-transform: uppercase;
+}
+.tab-tools { display: flex; align-items: center; gap: 2px; padding: 0 0 2px; }
+.tab-tools .icon-btn { width: 30px; height: 30px; }
+.tab-tools .icon-btn svg { width: 15px; height: 15px; }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--hair);
+  border-radius: 0 var(--r-card) var(--r-card) var(--r-card);
+  box-shadow: var(--shadow-1);
+  overflow: hidden;
+}
+.folder.is-collapsed .card { height: 7px; }
+.folder.is-drop-target .card { border-color: var(--tape); }
+
+/* flash the tab when something lands in it */
+@keyframes tab-flash {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(14, 74, 66, 0); }
+  30%      { box-shadow: 0 0 0 5px rgba(14, 74, 66, .28); }
+}
+.tab.is-flashing { animation: tab-flash .7s ease; }
+
+/* ── task rows ────────────────────────────────────────────────────────── */
+.tasks { display: block; }
+.task {
+  position: relative;
+  display: flex; align-items: flex-start; gap: 2px;
+  padding: 2px 6px 2px 0;
+  border-inline-start: 3px solid transparent;
+  scroll-margin-top: 160px; scroll-margin-bottom: 120px;
+  transition: background-color .1s ease, border-color .1s ease;
+}
+.task + .task::before {
+  content: ""; position: absolute; top: 0; left: 46px; right: 12px; height: 1px;
+  background: var(--hair);
+}
+.task:hover { background: var(--card-2); }
+.task.is-cursor {
+  background: var(--sel);
+  border-inline-start-color: var(--tape);
+}
+.task.is-cursor::before, .task.is-cursor + .task::before { opacity: 0; }
+
+.task-grip {
+  flex: none;
+  display: grid; place-items: center;
+  width: 22px; align-self: stretch;
+  color: var(--edge); cursor: grab;
+  visibility: hidden;
+}
+.task-grip svg { width: 11px; height: 15px; }
+.task:hover .task-grip, .task:focus-within .task-grip { visibility: visible; }
+.task.is-dragging { opacity: .4; }
+
+.task-check {
+  flex: none;
+  display: grid; place-items: center;
+  width: 34px; height: 34px;
+  border-radius: 7px;
+}
+.task-box {
+  display: grid; place-items: center;
+  width: 19px; height: 19px;
+  border: 1.75px solid var(--edge); border-radius: 5px;
+  background: var(--card);
+  transition: background-color .12s ease, border-color .12s ease;
+}
+.task-check:hover .task-box { border-color: var(--tape); }
+.task-box svg { width: 13px; height: 13px; color: var(--tape-ink); opacity: 0; }
+.task.is-done .task-box { background: var(--tape); border-color: var(--tape); }
+.task.is-done .task-box svg { opacity: 1; }
+
+.task-text {
+  flex: 1 1 auto; min-width: 0;
+  padding: 8px 8px 8px 2px;
+  font-size: 15.5px; line-height: 1.45;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+  border-radius: 5px;
+  align-self: center;
+  cursor: text;
+}
+.task.is-done .task-text {
+  color: var(--ink-2);
+  text-decoration: line-through;
+  text-decoration-thickness: 1.5px;
+  text-decoration-color: var(--edge);
+}
+.task-edit {
+  flex: 1 1 auto; min-width: 0;
+  height: 34px; padding: 0 8px;
+  align-self: center;
+  border: 1.5px solid var(--tape); border-radius: 6px;
+  background: var(--card);
+  font-size: 15.5px;
+}
+
+.task-actions {
+  flex: none;
+  display: flex; align-items: center; gap: 1px;
+  align-self: center;
+  visibility: hidden;
+}
+.task:hover .task-actions,
+.task:focus-within .task-actions,
+.task.is-acting .task-actions { visibility: visible; }
+/* no hover on touch, so the actions have to stay out; the grip goes away
+   instead, since HTML5 drag is a pointer affordance and would be a lie */
+@media (hover: none) {
+  .task-actions { visibility: visible; }
+  .task-grip { display: none; }
+}
+.task-actions .icon-btn { width: 32px; height: 32px; }
+.task-actions .icon-btn svg { width: 16px; height: 16px; }
+@media (max-width: 560px) {
+  .task-actions .icon-btn[data-act="task-up"],
+  .task-actions .icon-btn[data-act="task-down"] { display: none; }
+}
+
+/* a freshly captured row sweeps in */
+@keyframes land {
+  0%   { background: var(--sel); }
+  100% { background: transparent; }
+}
+.task.is-landed { animation: land 1.1s ease-out; }
+@keyframes reveal-pulse {
+  0%, 100% { background: transparent; }
+  25%, 60% { background: var(--sel); }
+}
+.task.is-revealed { animation: reveal-pulse 1.4s ease-in-out; }
+
+/* drop indicator */
+.task.drop-before::after, .task.drop-after::after {
+  content: ""; position: absolute; left: 12px; right: 12px; height: 2.5px;
+  background: var(--tape); border-radius: 2px;
+}
+.task.drop-before::after { top: -1px; }
+.task.drop-after::after  { bottom: -1px; }
+/* .folder is a flex column, so these pseudos become real 3px flex items */
+.folder.drop-before::before, .folder.drop-after::after {
+  content: ""; flex: none; height: 3px; border-radius: 2px; background: var(--tape);
+}
+
+/* ── add-a-task footer inside each card ───────────────────────────────── */
+.adder {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 12px 4px 24px;
+  border-top: 1px solid var(--hair);
+  background: var(--card);
+}
+.tasks:empty + .adder { border-top: 0; }
+.adder-btn {
+  display: flex; align-items: center; gap: 8px;
+  height: 36px; padding: 0 10px 0 6px;
+  border-radius: 7px;
+  color: var(--ink-2);
+  font-size: 14px;
+  transition: background-color .12s ease, color .12s ease;
+}
+.adder-btn svg { width: 15px; height: 15px; flex: none; }
+.adder-btn:hover { background: var(--card-2); color: var(--ink); }
+.adder-input {
+  flex: 1 1 auto; min-width: 0;
+  height: 36px; padding: 0 10px;
+  border: 1.5px solid var(--tape); border-radius: 6px;
+  background: var(--card);
+  font-size: 15.5px;
+}
+
+/* ── empty states ─────────────────────────────────────────────────────── */
+.empty-line {
+  padding: 14px 16px 14px 24px;
+  color: var(--ink-2);
+  font-family: var(--mono); font-size: 12.5px; letter-spacing: .02em;
+}
+.empty-block {
+  padding: 26px 24px 28px;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 12px;
+}
+.empty-block h2 {
+  font-family: var(--mono); font-size: 13px; font-weight: 700;
+  letter-spacing: .13em; text-transform: uppercase; color: var(--ink);
+}
+.empty-block p { color: var(--ink-2); font-size: 14.5px; max-width: 52ch; }
+.empty-block p b { color: var(--ink); font-weight: 600; }
+.empty-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 2px 0 0; }
+
+.btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  min-height: 38px; padding: 0 14px;
+  border: 1px solid var(--edge); border-radius: 7px;
+  background: var(--card); color: var(--ink);
+  font-size: 14px;
+  transition: border-color .12s ease, background-color .12s ease;
+}
+.btn:hover { border-color: var(--tape); background: var(--card-2); }
+.btn svg { width: 15px; height: 15px; }
+.btn-primary {
+  background: var(--tape); border-color: var(--tape); color: var(--tape-ink);
+  font-family: var(--mono); font-size: 12px; font-weight: 700;
+  letter-spacing: .11em; text-transform: uppercase;
+}
+.btn-primary:hover { background: var(--tape-2); border-color: var(--tape-2); }
+.btn-danger {
+  background: var(--flag); border-color: var(--flag); color: #fff;
+  font-family: var(--mono); font-size: 12px; font-weight: 700;
+  letter-spacing: .11em; text-transform: uppercase;
+}
+.btn-danger:hover { background: var(--flag-2); border-color: var(--flag-2); }
+
+/* a nothing-matches-the-filter banner, above the folders */
+.filter-void {
+  background: var(--card);
+  border: 1px dashed var(--edge);
+  border-radius: var(--r-card);
+  padding: 22px 24px;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 11px;
+}
+.filter-void h2 {
+  font-family: var(--mono); font-size: 13px; font-weight: 700;
+  letter-spacing: .13em; text-transform: uppercase;
+}
+.filter-void p { color: var(--ink-2); font-size: 14.5px; }
+
+.drawer-foot { display: flex; justify-content: center; padding: 4px 0 0; }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   DIALOGS
+   ───────────────────────────────────────────────────────────────────── */
+.dlg {
+  border: 0; padding: 0;
+  background: var(--card);
+  color: var(--ink);
+  border-radius: 12px;
+  box-shadow: var(--shadow-3);
+  width: min(620px, calc(100vw - 32px));
+  max-height: min(640px, calc(100dvh - 80px));
+  overflow: hidden;
+}
+.dlg::backdrop { background: rgba(16, 21, 25, .42); backdrop-filter: blur(2px); }
+.dlg[open] { display: flex; flex-direction: column; }
+.dlg-confirm { width: min(460px, calc(100vw - 32px)); }
+
+.dlg-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 14px 12px 18px;
+  border-bottom: 1px solid var(--hair);
+  flex: none;
+}
+.dlg-head h2 {
+  font-family: var(--mono); font-size: 12px; font-weight: 700;
+  letter-spacing: .13em; text-transform: uppercase; color: var(--ink-2);
+  flex: 1 1 auto; min-width: 0;
+}
+.dlg-body { overflow: auto; overscroll-behavior: contain; flex: 1 1 auto; scrollbar-gutter: stable; }
+.dlg-foot {
+  display: flex; align-items: center; gap: 10px; justify-content: flex-end;
+  padding: 13px 16px; border-top: 1px solid var(--hair); flex: none;
+}
+.dlg-foot .spacer { flex: 1 1 auto; }
+
+.search-field { display: flex; align-items: center; gap: 10px; padding: 15px 18px; flex: none; }
+.search-field svg { width: 18px; height: 18px; color: var(--ink-2); flex: none; }
+#search-input {
+  flex: 1 1 auto; min-width: 0;
+  height: 30px; border: 0; background: none; font-size: 17px;
+}
+#search-input::placeholder { color: var(--ink-3); }
+
+.res-group + .res-group { border-top: 1px solid var(--hair); }
+.res-head {
+  padding: 11px 18px 5px;
+  font-family: var(--mono); font-size: 11px; font-weight: 700;
+  letter-spacing: .13em; text-transform: uppercase; color: var(--ink-2);
+}
+.res {
+  display: flex; align-items: center; gap: 11px; width: 100%;
+  padding: 9px 18px;
+  font-size: 15px;
+  border-inline-start: 3px solid transparent;
+}
+.res:hover { background: var(--card-2); }
+.res.is-cursor { background: var(--sel); border-inline-start-color: var(--tape); }
+.res-mark { flex: none; width: 15px; height: 15px; color: var(--ink-2); }
+.res-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.res.is-done .res-text { color: var(--ink-2); text-decoration: line-through; }
+.res mark { background: #D5E8CF; color: var(--ink); border-radius: 2px; padding: 0 1px; font-weight: 600; }
+
+.pick { display: flex; align-items: center; gap: 11px; width: 100%; padding: 11px 18px; font-size: 15px;
+        border-inline-start: 3px solid transparent; }
+.pick:hover { background: var(--card-2); }
+.pick.is-cursor { background: var(--sel); border-inline-start-color: var(--tape); }
+.pick-name { flex: 1 1 auto; min-width: 0; font-family: var(--mono); font-size: 12.5px; font-weight: 700;
+             letter-spacing: .12em; text-transform: uppercase; overflow-wrap: anywhere; }
+.pick-here { font-family: var(--mono); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-2); }
+.pick svg { width: 15px; height: 15px; flex: none; color: var(--tape); }
+
+.confirm-body { padding: 20px 22px 4px; display: flex; flex-direction: column; gap: 10px; }
+.confirm-body h2 { font-size: 17px; font-weight: 600; }
+.confirm-body p { color: var(--ink-2); font-size: 14.5px; }
+
+.help-body { padding: 4px 0 8px; column-gap: 26px; }
+@media (min-width: 560px) { .help-body { columns: 2; padding: 4px 20px 8px; } }
+.help-group { break-inside: avoid; padding: 14px 20px 4px; }
+@media (min-width: 560px) { .help-group { padding: 14px 0 4px; } }
+.help-group h3 {
+  font-family: var(--mono); font-size: 11px; font-weight: 700;
+  letter-spacing: .13em; text-transform: uppercase; color: var(--ink-2);
+  padding: 0 0 7px;
+}
+.help-row { display: flex; align-items: baseline; gap: 10px; padding: 4px 0; }
+.help-keys { flex: none; display: flex; align-items: center; gap: 3px; }
+.help-row span { font-size: 14px; color: var(--ink); }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   TOAST — undo lives here
+   ───────────────────────────────────────────────────────────────────── */
+.toast-region {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 60;
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  padding: 0 16px 20px;
+  pointer-events: none;
+}
+.toast {
+  display: flex; align-items: center; gap: 14px;
+  max-width: min(560px, 100%);
+  padding: 11px 12px 11px 18px;
+  border-radius: 9px;
+  background: var(--ink); color: #F4F7F9;
+  box-shadow: var(--shadow-2);
+  pointer-events: auto;
+  animation: toast-in .18s ease;
+}
+@keyframes toast-in { from { opacity: 0; transform: translateY(10px); } }
+.toast.is-going { opacity: 0; transform: translateY(8px); transition: opacity .2s ease, transform .2s ease; }
+.toast p { font-size: 14.5px; min-width: 0; overflow-wrap: anywhere; }
+.toast-undo {
+  flex: none;
+  display: flex; align-items: center; gap: 7px;
+  height: 34px; padding: 0 12px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, .14); color: #FFF;
+  font-family: var(--mono); font-size: 11.5px; font-weight: 700;
+  letter-spacing: .1em; text-transform: uppercase;
+  transition: background-color .12s ease;
+}
+.toast-undo:hover { background: rgba(255, 255, 255, .26); }
+.toast-undo:focus-visible { outline-color: #FFF; }
+.toast-close { flex: none; color: #C7D2D9; }
+.toast-close:hover { background: rgba(255, 255, 255, .14); color: #FFF; }
+.toast-close:focus-visible { outline-color: #FFF; }
+
+/* ── narrow screens ───────────────────────────────────────────────────── */
+@media (max-width: 620px) {
+  .masthead { padding: 12px 14px 8px; gap: 10px; }
+  .masthead-tools { width: 100%; justify-content: space-between; }
+  .capture { padding: 0 14px; }
+  .drawer { padding: 14px 14px 0; gap: 18px; }
+  #capture-input { height: 50px; font-size: 16px; }
+  .capture-file { padding: 0 11px; }
+  .capture-file svg { display: none; }
+  #capture-target-select { max-width: 104px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+  }
+}
+</style>
+
+<a class="skip" href="#drawer">Skip to the drawer</a>
+
+<div class="topbar" id="topbar">
+  <div class="masthead">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M3 8.5V18a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8.5H3Z" fill="currentColor" opacity=".18"/>
+        <path d="M3 8.5V18a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        <path d="M3 8.5V6a2 2 0 0 1 2-2h4.2a2 2 0 0 1 1.6.8l1.4 1.9H19a2 2 0 0 1 2 2v.3" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+      </svg>
+      <h1>SimpleGTD</h1>
+    </div>
+
+    <div class="masthead-tools">
+      <button type="button" class="search-btn" id="btn-search">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <circle cx="11" cy="11" r="6.5" stroke="currentColor" stroke-width="1.9"/>
+          <path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
+        </svg>
+        Search<span class="kbd">/</span>
+      </button>
+
+      <div class="filters" role="group" aria-label="Show which tasks">
+        <button type="button" data-filter="all"    aria-pressed="true">All</button>
+        <button type="button" data-filter="active" aria-pressed="false">Active</button>
+        <button type="button" data-filter="done"   aria-pressed="false">Done</button>
+      </div>
+
+      <button type="button" class="icon-btn" id="btn-help" aria-label="Keyboard shortcuts">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <rect x="2.5" y="5.5" width="19" height="13" rx="2.5" stroke="currentColor" stroke-width="1.7"/>
+          <path d="M6.5 9.5h.01M10 9.5h.01M13.5 9.5h.01M17 9.5h.01M8 14.5h8" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <div class="capture">
+    <form class="capture-form" id="capture-form" autocomplete="off">
+      <span class="capture-caret" aria-hidden="true">&#9656;</span>
+      <input id="capture-input" name="capture" placeholder="What&rsquo;s got your attention?"
+             aria-label="Capture a task" spellcheck="false">
+      <div class="capture-tail">
+        <span class="capture-target">
+          <label class="sr" for="capture-target-select">File it in</label>
+          <select id="capture-target-select"></select>
+        </span>
+        <button type="submit" class="capture-file">
+          File
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M4 12h14M13 7l5 5-5 5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </div>
+    </form>
+    <p class="capture-hint">
+      <b>Enter</b> files it &middot; <b>Alt&#8593;&#8595;</b> changes where &middot; paste several lines to file them all
+    </p>
+  </div>
+</div>
+
+<main id="drawer" class="drawer" tabindex="-1"></main>
+
+<div id="toast-region" class="toast-region" role="status" aria-live="polite"></div>
+
+<dialog id="dlg-search" class="dlg dlg-search" aria-label="Search all tasks"></dialog>
+<dialog id="dlg-move"   class="dlg dlg-move"   aria-label="File in another section"></dialog>
+<dialog id="dlg-confirm" class="dlg dlg-confirm"></dialog>
+<dialog id="dlg-help"   class="dlg dlg-help"   aria-label="Keyboard shortcuts"></dialog>
+
+<script type="module">
+/* ═════════════════════════════════════════════════════════════════════════
+   fractional-indexing — vendored
+   Ported from the npm package `fractional-indexing` (MIT, Rocicorp), which
+   implements David Greenspan's "Implementing Fractional Indexing". Vendored
+   rather than imported so this file opens with no network. Same base-62 key
+   format and same semantics as the published package.
+   ═════════════════════════════════════════════════════════════════════════ */
+const DIGITS = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+const ZERO = DIGITS[0];
+
+function integerLength(head) {
+  if (head >= 'a' && head <= 'z') return head.charCodeAt(0) - 97 + 2;
+  if (head >= 'A' && head <= 'Z') return 90 - head.charCodeAt(0) + 2;
+  throw new Error('invalid order key head: ' + head);
+}
+function validateInteger(int) {
+  if (int.length !== integerLength(int[0])) throw new Error('invalid integer part: ' + int);
+}
+function integerPart(key) {
+  const len = integerLength(key[0]);
+  if (len > key.length) throw new Error('invalid order key: ' + key);
+  return key.slice(0, len);
+}
+function validateOrderKey(key) {
+  if (key === 'A' + ZERO.repeat(26)) throw new Error('invalid order key: ' + key);
+  const i = integerPart(key);
+  if (key.slice(i.length).slice(-1) === ZERO) throw new Error('invalid order key (trailing zero): ' + key);
+}
+function incrementInteger(x) {
+  validateInteger(x);
+  const [head, ...digs] = x.split('');
+  let carry = true;
+  for (let i = digs.length - 1; carry && i >= 0; i--) {
+    const d = DIGITS.indexOf(digs[i]) + 1;
+    if (d === DIGITS.length) digs[i] = ZERO;
+    else { digs[i] = DIGITS[d]; carry = false; }
+  }
+  if (carry) {
+    if (head === 'Z') return 'a' + ZERO;
+    if (head === 'z') return null;
+    const h = String.fromCharCode(head.charCodeAt(0) + 1);
+    if (h > 'a') digs.push(ZERO); else digs.pop();
+    return h + digs.join('');
+  }
+  return head + digs.join('');
+}
+function decrementInteger(x) {
+  validateInteger(x);
+  const [head, ...digs] = x.split('');
+  let borrow = true;
+  for (let i = digs.length - 1; borrow && i >= 0; i--) {
+    const d = DIGITS.indexOf(digs[i]) - 1;
+    if (d === -1) digs[i] = DIGITS.slice(-1);
+    else { digs[i] = DIGITS[d]; borrow = false; }
+  }
+  if (borrow) {
+    if (head === 'a') return 'Z' + DIGITS.slice(-1);
+    if (head === 'A') return null;
+    const h = String.fromCharCode(head.charCodeAt(0) - 1);
+    if (h < 'Z') digs.push(DIGITS.slice(-1)); else digs.pop();
+    return h + digs.join('');
+  }
+  return head + digs.join('');
+}
+function midpoint(a, b) {
+  if (b !== null && a >= b) throw new Error(a + ' >= ' + b);
+  if (a.slice(-1) === ZERO || (b && b.slice(-1) === ZERO)) throw new Error('trailing zero');
+  if (b) {
+    let n = 0;
+    while ((a[n] || ZERO) === b[n]) n++;
+    if (n > 0) return b.slice(0, n) + midpoint(a.slice(n), b.slice(n));
+  }
+  const dA = a ? DIGITS.indexOf(a[0]) : 0;
+  const dB = b != null ? DIGITS.indexOf(b[0]) : DIGITS.length;
+  if (dB - dA > 1) return DIGITS[Math.round(.5 * (dA + dB))];
+  if (b && b.length > 1) return b.slice(0, 1);
+  return DIGITS[dA] + midpoint(a.slice(1), null);
+}
+/** Order key strictly between a and b. Either bound may be null (open end). */
+function generateKeyBetween(a, b) {
+  if (a !== null) validateOrderKey(a);
+  if (b !== null) validateOrderKey(b);
+  if (a !== null && b !== null && a >= b) throw new Error(a + ' >= ' + b);
+  if (a === null) {
+    if (b === null) return 'a' + ZERO;
+    const ib = integerPart(b), fb = b.slice(ib.length);
+    if (ib === 'A' + ZERO.repeat(26)) return ib + midpoint('', fb);
+    if (ib < b) return ib;
+    const res = decrementInteger(ib);
+    if (res === null) throw new Error('cannot decrement any more');
+    return res;
+  }
+  if (b === null) {
+    const ia = integerPart(a), fa = a.slice(ia.length);
+    const i = incrementInteger(ia);
+    return i === null ? ia + midpoint(fa, null) : i;
+  }
+  const ia = integerPart(a), fa = a.slice(ia.length);
+  const ib = integerPart(b), fb = b.slice(ib.length);
+  if (ia === ib) return ia + midpoint(fa, fb);
+  const i = incrementInteger(ia);
+  if (i === null) throw new Error('cannot increment any more');
+  if (i < b) return i;
+  return ia + midpoint(fa, null);
+}
+/** n evenly-spread order keys strictly between a and b. */
+function generateNKeysBetween(a, b, n) {
+  if (n <= 0) return [];
+  if (n === 1) return [generateKeyBetween(a, b)];
+  if (b === null) {
+    let c = generateKeyBetween(a, b);
+    const out = [c];
+    for (let i = 0; i < n - 1; i++) { c = generateKeyBetween(c, b); out.push(c); }
+    return out;
+  }
+  if (a === null) {
+    let c = generateKeyBetween(a, b);
+    const out = [c];
+    for (let i = 0; i < n - 1; i++) { c = generateKeyBetween(a, c); out.push(c); }
+    return out.reverse();
+  }
+  const mid = Math.floor(n / 2);
+  const c = generateKeyBetween(a, b);
+  return [...generateNKeysBetween(a, c, mid), c, ...generateNKeysBetween(c, b, n - mid - 1)];
+}
+
+/* ═════════════════════════════════════════════════════════════════════════
+   STORE
+   Two flat arrays. A task holds the id of its section. Nothing nests.
+   ═════════════════════════════════════════════════════════════════════════ */
+const STORAGE_KEY = 'simplegtd.v3';
+const uid = () =>
+  (crypto.randomUUID?.() ?? 'x' + Date.now().toString(36) + Math.random().toString(36).slice(2, 9));
+
+/* Persisted: user data, plus the interface state worth waking up to —
+   which filter, which sections are shut, where capture points, the unsent
+   draft, and the cursor. Deliberately not persisted: the search query, open
+   dialogs, half-typed inline edits and the undo stack. Restoring those
+   would land you somewhere you never left. */
+const state = {
+  version: 3,
+  sections: [],   // { id, name, order, collapsed }
+  tasks: [],      // { id, sectionId, text, done, order }
+  filter: 'all',  // all | active | done
+  captureTarget: null,
+  captureDraft: '',
+  cursor: null,   // { type: 'task' | 'section', id }
+};
+
+/* Session-only. */
+let editing = null;   // task id being renamed inline
+let renaming = null;  // section id being renamed inline
+let adding = null;    // section id with its add-a-task field open
+let undoStack = [];   // last few deletes, newest last
+
+const SEED = [
+  ['Inbox', [
+    'Anything undecided lands here — press C from anywhere to add to it',
+    'Once you know what a thing is, press M to file it somewhere real',
+    'Read what Priya sent about the office move',
+  ]],
+  ['Next Actions', [
+    'Call the dentist about the crown that came loose',
+    'Draft the two-line reply to the landlord',
+    'Book an aisle seat for the Thursday flight',
+    'Press X to tick one of these off',
+  ]],
+  ['Waiting For', [
+    'Sam — the signed lease, asked Tuesday',
+    'Airline refund, they said 21 days',
+    'Park anything on someone else’s desk here so it stops circling',
+  ]],
+  ['Someday / Maybe', [
+    'Learn to sail',
+    'Reread the Vorkosigan books in order',
+    'Nothing in here is a commitment. That is the whole point.',
+  ]],
+];
+
+function seed() {
+  const keys = generateNKeysBetween(null, null, SEED.length);
+  state.sections = SEED.map(([name], i) => ({ id: uid(), name, order: keys[i], collapsed: false }));
+  state.tasks = [];
+  state.sections.forEach((sec, i) => {
+    const texts = SEED[i][1];
+    const tk = generateNKeysBetween(null, null, texts.length);
+    texts.forEach((text, j) => state.tasks.push({
+      id: uid(), sectionId: sec.id, text, done: false, order: tk[j],
+    }));
+  });
+  state.captureTarget = state.sections[0].id;
+  state.filter = 'all';
+  state.captureDraft = '';
+  state.cursor = null;
+}
+
+function save() {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+  catch { /* private mode, quota, whatever — the app still works this session */ }
+}
+
+function load() {
+  let raw = null;
+  try { raw = localStorage.getItem(STORAGE_KEY); } catch { /* ignore */ }
+  if (!raw) { seed(); save(); return; }
+  try {
+    const d = JSON.parse(raw);
+    if (!Array.isArray(d.sections) || !Array.isArray(d.tasks)) throw new Error('shape');
+    state.sections = d.sections.map(s => ({
+      id: String(s.id), name: String(s.name ?? 'Untitled'),
+      order: String(s.order), collapsed: !!s.collapsed,
+    }));
+    const known = new Set(state.sections.map(s => s.id));
+    state.tasks = d.tasks
+      .filter(t => known.has(String(t.sectionId)))   // never keep an orphan
+      .map(t => ({
+        id: String(t.id), sectionId: String(t.sectionId),
+        text: String(t.text ?? ''), done: !!t.done, order: String(t.order),
+      }));
+    state.filter = ['all', 'active', 'done'].includes(d.filter) ? d.filter : 'all';
+    state.captureTarget = known.has(String(d.captureTarget)) ? String(d.captureTarget)
+                        : (state.sections[0]?.id ?? null);
+    state.captureDraft = typeof d.captureDraft === 'string' ? d.captureDraft : '';
+    state.cursor = d.cursor && d.cursor.id ? { type: d.cursor.type, id: String(d.cursor.id) } : null;
+  } catch {
+    seed();
+  }
+}
+
+/* ── ordered reads ─────────────────────────────────────────────────────── */
+const byOrder = (a, b) => (a.order < b.order ? -1 : a.order > b.order ? 1 : a.id < b.id ? -1 : 1);
+const sections = () => [...state.sections].sort(byOrder);
+const tasksIn = id => state.tasks.filter(t => t.sectionId === id).sort(byOrder);
+const sectionById = id => state.sections.find(s => s.id === id) ?? null;
+const taskById = id => state.tasks.find(t => t.id === id) ?? null;
+const passesFilter = t => state.filter === 'all' || (state.filter === 'done' ? t.done : !t.done);
+const visibleIn = id => tasksIn(id).filter(passesFilter);
+
+/** Order key that puts a record at index `i` of `list` (i === list.length → end). */
+function keyAt(list, i) {
+  const before = i > 0 ? list[i - 1].order : null;
+  const after = i < list.length ? list[i].order : null;
+  return generateKeyBetween(before, after);
+}
+
+/* ═════════════════════════════════════════════════════════════════════════
+   RENDER
+   The drawer is rebuilt wholesale on every change — the spec says not to
+   worry about performance below quadratic, and a full rebuild removes a
+   whole class of stale-DOM bugs. Focus is captured before and restored
+   after, so keyboard work survives the rebuild.
+   ═════════════════════════════════════════════════════════════════════════ */
+const $ = sel => document.querySelector(sel);
+const esc = s => String(s).replace(/[&<>"']/g, c =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+const ICON = {
+  chev:  '<svg class="chev" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m5 9 7 7 7-7" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  check: '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m4.5 12.5 5 5 10-11" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  grip:  '<svg viewBox="0 0 12 16" fill="currentColor" aria-hidden="true"><circle cx="3" cy="3" r="1.4"/><circle cx="9" cy="3" r="1.4"/><circle cx="3" cy="8" r="1.4"/><circle cx="9" cy="8" r="1.4"/><circle cx="3" cy="13" r="1.4"/><circle cx="9" cy="13" r="1.4"/></svg>',
+  up:    '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 19V6m0 0-5.5 5.5M12 6l5.5 5.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  down:  '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 5v13m0 0 5.5-5.5M12 18l-5.5-5.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  move:  '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 7.5V18a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-6.5a2 2 0 0 0-2-2h-7l-1.6-2.2a2 2 0 0 0-1.6-.8H5a2 2 0 0 0-2 2Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9 15h6m0 0-2.2-2.2M15 15l-2.2 2.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  trash: '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4.5 6.5h15M9.5 6.5V5a1.5 1.5 0 0 1 1.5-1.5h2A1.5 1.5 0 0 1 14.5 5v1.5M6.5 6.5 7.4 19a2 2 0 0 0 2 1.9h5.2a2 2 0 0 0 2-1.9l.9-12.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  pencil:'<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 20h4L19.5 8.5a2.1 2.1 0 0 0-3-3L5 17v3Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>',
+  plus:  '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>',
+  undo:  '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 9h9.5a5.5 5.5 0 0 1 0 11H8M4 9l4-4M4 9l4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  close: '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>',
+  search:'<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="11" cy="11" r="6.5" stroke="currentColor" stroke-width="1.9"/><path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>',
+  dot:   '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="5" stroke="currentColor" stroke-width="1.8"/></svg>',
+};
+
+const FILTER_WORD = { all: 'All', active: 'Active', done: 'Done' };
+
+function render() {
+  normaliseCursor();
+  const restore = grabFocus();
+  renderCaptureTarget();
+  renderFilters();
+  renderDrawer();
+  putFocus(restore);
+}
+
+/* A cursor pointing at something deleted, filtered away or shut inside a
+   collapsed section would leave the drawer with no tab stop at all. */
+function normaliseCursor() {
+  const flat = flatRows();
+  if (!flat.length) { state.cursor = null; return; }
+  const ok = state.cursor && flat.some(r => r.type === state.cursor.type && r.id === state.cursor.id);
+  if (!ok) state.cursor = flat.find(r => r.type === 'task') ?? flat[0];
+}
+
+/* ── what had focus, so we can hand it back after the rebuild ─────────── */
+function grabFocus() {
+  const el = document.activeElement;
+  if (!el || !$('#drawer').contains(el)) return null;
+  if (el.classList.contains('task-edit')) return { kind: 'edit', start: el.selectionStart, end: el.selectionEnd };
+  if (el.classList.contains('adder-input')) return { kind: 'add' };
+  if (el.classList.contains('tab-rename')) return { kind: 'rename', start: el.selectionStart, end: el.selectionEnd };
+  const row = el.closest('.task, .tab');
+  if (row) return { kind: 'cursor' };
+  return null;
+}
+
+function putFocus(restore) {
+  if (!restore) return;
+  if (restore.kind === 'edit') {
+    const i = $('.task-edit');
+    if (i) { i.focus(); try { i.setSelectionRange(restore.start, restore.end); } catch {} return; }
+  }
+  if (restore.kind === 'add') { $('.adder-input')?.focus(); return; }
+  if (restore.kind === 'rename') {
+    const i = $('.tab-rename');
+    if (i) { i.focus(); try { i.setSelectionRange(restore.start, restore.end); } catch {} return; }
+  }
+  focusCursor();
+}
+
+function focusCursor() {
+  const el = cursorEl();
+  if (el) el.focus({ preventScroll: true });
+}
+const cursorEl = () => (state.cursor
+  ? $(`[data-cursor-id="${CSS.escape(state.cursor.id)}"]`)
+  : null);
+
+/* ── capture target + filters ─────────────────────────────────────────── */
+function renderCaptureTarget() {
+  const sel = $('#capture-target-select');
+  const list = sections();
+  if (!list.length) { sel.innerHTML = '<option>No sections</option>'; sel.disabled = true; return; }
+  sel.disabled = false;
+  if (!list.some(s => s.id === state.captureTarget)) state.captureTarget = list[0].id;
+  sel.innerHTML = list.map(s =>
+    `<option value="${esc(s.id)}"${s.id === state.captureTarget ? ' selected' : ''}>${esc(s.name)}</option>`
+  ).join('');
+}
+
+function renderFilters() {
+  document.querySelectorAll('.filters button').forEach(b => {
+    b.setAttribute('aria-pressed', String(b.dataset.filter === state.filter));
+  });
+}
+
+/* ── the drawer ───────────────────────────────────────────────────────── */
+function renderDrawer() {
+  const drawer = $('#drawer');
+  const list = sections();
+
+  if (!list.length) { drawer.innerHTML = emptyDrawer(); return; }
+
+  const nothingShows = state.tasks.length > 0 && !state.tasks.some(passesFilter);
+  const html = [];
+
+  if (nothingShows) html.push(filterVoid());
+  html.push(list.map(renderSection).join(''));
+  html.push(`<div class="drawer-foot">
+    <button type="button" class="btn" data-act="new-section">${ICON.plus} New section <span class="kbd">S</span></button>
+  </div>`);
+
+  drawer.innerHTML = html.join('');
+}
+
+function emptyDrawer() {
+  return `<div class="card empty-block" style="border-radius:var(--r-card)">
+    <h2>The drawer is empty</h2>
+    <p>Sections are the buckets you file into — an <b>Inbox</b> for anything undecided,
+       <b>Next Actions</b> for what you can actually do, <b>Waiting For</b> to park what
+       sits on someone else’s desk.</p>
+    <div class="empty-actions">
+      <button type="button" class="btn btn-primary" data-act="new-section">${ICON.plus} Add a section</button>
+      <button type="button" class="btn" data-act="reseed">Start with the standard four</button>
+      <span class="kbd">S</span>
+    </div>
+  </div>`;
+}
+
+function filterVoid() {
+  const word = FILTER_WORD[state.filter];
+  const line = state.filter === 'done'
+    ? 'Nothing is ticked off yet. Do a thing, then press X on it.'
+    : 'Everything here is ticked off. Nice.';
+  return `<div class="filter-void">
+    <h2>Nothing matches ${esc(word)}</h2>
+    <p>${line}</p>
+    <div class="empty-actions">
+      <button type="button" class="btn btn-primary" data-act="filter" data-filter="all">Show all tasks</button>
+      <span class="kbd">1</span>
+    </div>
+  </div>`;
+}
+
+function renderSection(sec) {
+  const shown = visibleIn(sec.id);
+  const total = tasksIn(sec.id).length;
+  const isCursor = state.cursor?.type === 'section' && state.cursor.id === sec.id;
+  const cls = ['folder'];
+  if (sec.collapsed) cls.push('is-collapsed');
+  if (isCursor) cls.push('is-cursor');
+
+  const tabInner = renaming === sec.id
+    ? `<input class="tab-rename" value="${esc(sec.name)}" aria-label="Section name" spellcheck="false">`
+    : `${ICON.chev}<span class="tab-name">${esc(sec.name)}</span>`;
+
+  const tab = renaming === sec.id
+    ? `<div class="tab" style="cursor:default">${tabInner}</div>`
+    : `<button type="button" class="tab on-tape" draggable="true" data-act="toggle-collapse" data-section="${esc(sec.id)}"
+         data-cursor-id="${esc(sec.id)}" tabindex="${isCursor ? 0 : -1}"
+         aria-expanded="${!sec.collapsed}" aria-controls="card-${esc(sec.id)}"
+         title="${sec.collapsed ? 'Open' : 'Shut'} ${esc(sec.name)}">${tabInner}</button>`;
+
+  const body = sec.collapsed ? '' : `
+    <div class="tasks" role="list">${shown.map(t => renderTask(t, sec)).join('')}</div>
+    ${shown.length ? '' : sectionEmpty(sec, total)}
+    ${adding === sec.id
+      ? `<div class="adder"><input class="adder-input" data-section="${esc(sec.id)}"
+           placeholder="A line of text, then Enter" aria-label="New task in ${esc(sec.name)}" spellcheck="false"></div>`
+      : `<div class="adder"><button type="button" class="adder-btn" data-act="open-adder" data-section="${esc(sec.id)}"
+           tabindex="-1">${ICON.plus} Add a task</button></div>`}`;
+
+  return `<section class="${cls.join(' ')}" data-section="${esc(sec.id)}" aria-label="${esc(sec.name)}">
+    <div class="tab-row">
+      ${tab}
+      <div class="tab-tools">
+        <button type="button" class="icon-btn" data-act="rename-section" data-section="${esc(sec.id)}"
+          tabindex="-1" aria-label="Rename ${esc(sec.name)}">${ICON.pencil}</button>
+        <button type="button" class="icon-btn" data-act="section-up" data-section="${esc(sec.id)}"
+          tabindex="-1" aria-label="Move ${esc(sec.name)} up">${ICON.up}</button>
+        <button type="button" class="icon-btn" data-act="section-down" data-section="${esc(sec.id)}"
+          tabindex="-1" aria-label="Move ${esc(sec.name)} down">${ICON.down}</button>
+        <button type="button" class="icon-btn danger" data-act="delete-section" data-section="${esc(sec.id)}"
+          tabindex="-1" aria-label="Delete ${esc(sec.name)}">${ICON.trash}</button>
+      </div>
+    </div>
+    <div class="card" id="card-${esc(sec.id)}">${body}</div>
+  </section>`;
+}
+
+function sectionEmpty(sec, total) {
+  if (total === 0) {
+    return `<div class="empty-block" style="padding:18px 24px 20px">
+      <p>Nothing filed in ${esc(sec.name)} yet.</p>
+      <div class="empty-actions">
+        <button type="button" class="btn" data-act="open-adder" data-section="${esc(sec.id)}">${ICON.plus} Add a task</button>
+        <span class="kbd">A</span>
+      </div>
+    </div>`;
+  }
+  const line = state.filter === 'done'
+    ? `Nothing in ${esc(sec.name)} is ticked off yet.`
+    : `Everything in ${esc(sec.name)} is ticked off.`;
+  return `<p class="empty-line">${line} <button type="button" class="adder-btn"
+     style="display:inline-flex;height:26px;padding:0 8px;text-decoration:underline"
+     data-act="filter" data-filter="all">Show all</button></p>`;
+}
+
+function renderTask(t, sec) {
+  const isCursor = state.cursor?.type === 'task' && state.cursor.id === t.id;
+  const cls = ['task'];
+  if (t.done) cls.push('is-done');
+  if (isCursor) cls.push('is-cursor');
+
+  const middle = editing === t.id
+    ? `<input class="task-edit" value="${esc(t.text)}" aria-label="Edit task" spellcheck="false">`
+    : `<span class="task-text">${esc(t.text)}</span>`;
+
+  return `<div class="${cls.join(' ')}" role="listitem" data-task="${esc(t.id)}"
+      data-cursor-id="${esc(t.id)}" tabindex="${isCursor ? 0 : -1}"
+      draggable="${editing === t.id ? 'false' : 'true'}"
+      aria-label="${esc(t.text)}${t.done ? ', done' : ''}">
+    <span class="task-grip" aria-hidden="true">${ICON.grip}</span>
+    <button type="button" class="task-check" data-act="toggle" data-task="${esc(t.id)}"
+      tabindex="-1" role="checkbox" aria-checked="${t.done}"
+      aria-label="${t.done ? 'Untick' : 'Tick'} ${esc(t.text)}">
+      <span class="task-box">${ICON.check}</span>
+    </button>
+    ${middle}
+    <span class="task-actions">
+      <button type="button" class="icon-btn" data-act="task-up" data-task="${esc(t.id)}"
+        tabindex="-1" aria-label="Move up">${ICON.up}</button>
+      <button type="button" class="icon-btn" data-act="task-down" data-task="${esc(t.id)}"
+        tabindex="-1" aria-label="Move down">${ICON.down}</button>
+      <button type="button" class="icon-btn" data-act="move-task" data-task="${esc(t.id)}"
+        tabindex="-1" aria-label="File in another section">${ICON.move}</button>
+      <button type="button" class="icon-btn danger" data-act="delete-task" data-task="${esc(t.id)}"
+        tabindex="-1" aria-label="Delete">${ICON.trash}</button>
+    </span>
+  </div>`;
+}
+
+/* ═════════════════════════════════════════════════════════════════════════
+   TOAST + UNDO
+   Deletion is permanent, so nothing goes without either a confirmation or
+   a way back. The undo stack is session-only on purpose: offering to undo
+   something you deleted last Tuesday is worse than not offering at all.
+   ═════════════════════════════════════════════════════════════════════════ */
+let toastTimer = null;
+
+function toast(message, undoLabel) {
+  const region = $('#toast-region');
+  region.innerHTML = '';
+  clearTimeout(toastTimer);
+
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.innerHTML = `<p>${esc(message)}</p>
+    ${undoLabel ? `<button type="button" class="toast-undo" data-act="undo">${ICON.undo} ${esc(undoLabel)}</button>` : ''}
+    <button type="button" class="icon-btn toast-close" data-act="toast-close" aria-label="Dismiss">${ICON.close}</button>`;
+  region.appendChild(el);
+
+  toastTimer = setTimeout(() => dismissToast(), undoLabel ? 9000 : 4500);
+}
+
+function dismissToast() {
+  const el = $('.toast');
+  if (!el) return;
+  el.classList.add('is-going');
+  setTimeout(() => el.remove(), 220);
+}
+
+function pushUndo(entry) {
+  undoStack.push(entry);
+  if (undoStack.length > 12) undoStack.shift();
+}
+
+function undo() {
+  const entry = undoStack.pop();
+  if (!entry) { toast('Nothing to undo in this session.'); return; }
+  if (entry.kind === 'task') {
+    if (!sectionById(entry.task.sectionId)) { toast('That task’s section is gone, so it can’t come back.'); return; }
+    state.tasks.push(entry.task);
+    state.cursor = { type: 'task', id: entry.task.id };
+    commit();
+    reveal(entry.task.id, { quiet: true });
+    toast('Put “' + clip(entry.task.text) + '” back.');
+  } else {
+    state.sections.push(entry.section);
+    state.tasks.push(...entry.tasks);
+    state.cursor = { type: 'section', id: entry.section.id };
+    commit();
+    scrollToSection(entry.section.id);
+    toast('Put ' + entry.section.name + ' back, with everything in it.');
+  }
+}
+
+const clip = (s, n = 46) => (s.length > n ? s.slice(0, n - 1).trimEnd() + '…' : s);
+
+/* ═════════════════════════════════════════════════════════════════════════
+   MUTATIONS — every one of these saves, then re-renders
+   ═════════════════════════════════════════════════════════════════════════ */
+function commit() { save(); render(); }
+
+/* ── capture ──────────────────────────────────────────────────────────── */
+function captureLines(lines, sectionId) {
+  const sec = sectionById(sectionId);
+  if (!sec) return [];
+  const texts = lines.map(l => l.trim()).filter(Boolean);
+  if (!texts.length) return [];
+  const existing = tasksIn(sec.id);
+  const last = existing.length ? existing[existing.length - 1].order : null;
+  const keys = generateNKeysBetween(last, null, texts.length);
+  const made = texts.map((text, i) => ({
+    id: uid(), sectionId: sec.id, text, done: false, order: keys[i],
+  }));
+  state.tasks.push(...made);
+  if (sec.collapsed) sec.collapsed = false;   // never file into a shut drawer
+  // A new task is active by definition, so the Done filter would swallow it.
+  if (state.filter === 'done') state.filter = 'all';
+  return made;
+}
+
+function doCapture(raw) {
+  const lines = String(raw).split(/\r?\n/);
+  const target = state.captureTarget;
+  const wasFilter = state.filter;
+  const made = captureLines(lines, target);
+  if (!made.length) return false;
+
+  const sec = sectionById(target);
+  state.captureDraft = '';
+  state.cursor = { type: 'task', id: made[made.length - 1].id };
+  commit();
+
+  land(made.map(t => t.id), target);
+  if (wasFilter !== state.filter) toast(`Filed in ${sec.name}, and switched off the ${FILTER_WORD[wasFilter]} filter so you can see it.`);
+  else if (made.length > 1) toast(`Filed ${made.length} tasks in ${sec.name}.`);
+  return true;
+}
+
+/** The signature moment: the row lands, the tab flashes. */
+function land(ids, sectionId) {
+  const folder = document.querySelector(`.folder[data-section="${CSS.escape(sectionId)}"]`);
+  folder?.querySelector('.tab')?.classList.add('is-flashing');
+  ids.forEach(id => document.querySelector(`.task[data-task="${CSS.escape(id)}"]`)?.classList.add('is-landed'));
+  const first = document.querySelector(`.task[data-task="${CSS.escape(ids[0])}"]`);
+  if (first && !inView(first)) first.scrollIntoView({ block: 'center', behavior: motionOk() ? 'smooth' : 'auto' });
+}
+
+const motionOk = () => !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+function inView(el) {
+  const r = el.getBoundingClientRect();
+  return r.top >= 150 && r.bottom <= window.innerHeight - 20;
+}
+/* Narrow screens hide some row buttons outright — never hand focus to one. */
+const firstVisible = list => [...(list ?? [])].find(el => el.offsetParent !== null) ?? null;
+
+/* ── tasks ────────────────────────────────────────────────────────────── */
+function addTask(sectionId, text) {
+  const made = captureLines([text], sectionId);
+  if (!made.length) return null;
+  state.cursor = { type: 'task', id: made[0].id };
+  save();
+  return made[0];
+}
+
+function toggleTask(id) {
+  const t = taskById(id);
+  if (!t) return;
+  const near = neighbourOf(id);          // work this out before it can vanish
+  t.done = !t.done;
+  // Ticking off under the Active filter makes the row disappear. Move the
+  // cursor somewhere sensible rather than letting it snap back to the top,
+  // and say what happened.
+  const vanished = !passesFilter(t);
+  state.cursor = vanished ? (near ?? { type: 'section', id: t.sectionId }) : { type: 'task', id };
+  commit();
+  focusCursor();
+  if (vanished) toast(`“${clip(t.text)}” is ${t.done ? 'done' : 'active'} now, so the ${FILTER_WORD[state.filter]} filter hides it.`);
+}
+
+function renameTask(id, text) {
+  const t = taskById(id);
+  if (!t) return;
+  const next = text.trim();
+  if (!next) { toast('A task needs some text, so nothing changed.'); return; }
+  t.text = next;
+  save();
+}
+
+function deleteTask(id) {
+  const t = taskById(id);
+  if (!t) return;
+  const near = neighbourOf(id);
+  state.tasks = state.tasks.filter(x => x.id !== id);
+  pushUndo({ kind: 'task', task: t });
+  state.cursor = near;
+  commit();
+  toast(`Deleted “${clip(t.text)}”.`, 'Undo');
+}
+
+/* Steps past the next *visible* neighbour, not the next stored one — under
+   a filter, hopping over rows you can't see reads as nothing happening. */
+function nudgeTask(id, dir) {
+  const t = taskById(id);
+  if (!t) return;
+  const seen = visibleIn(t.sectionId);
+  const i = seen.findIndex(x => x.id === id);
+  const j = i + dir;
+  if (i === -1 || j < 0 || j >= seen.length) return;
+
+  const rest = tasksIn(t.sectionId).filter(x => x.id !== id);
+  const anchor = rest.findIndex(x => x.id === seen[j].id);
+  t.order = keyAt(rest, anchor + (dir > 0 ? 1 : 0));
+  state.cursor = { type: 'task', id };
+  commit();
+  focusCursor();
+}
+
+function moveTaskToSection(id, sectionId, index = null) {
+  const t = taskById(id);
+  const sec = sectionById(sectionId);
+  if (!t || !sec) return;
+  const target = tasksIn(sectionId).filter(x => x.id !== id);
+  t.sectionId = sectionId;
+  t.order = keyAt(target, index === null ? target.length : index);
+  if (sec.collapsed) sec.collapsed = false;
+  state.cursor = { type: 'task', id };
+  commit();
+  reveal(id, { quiet: true });
+}
+
+/** Where the cursor should land after `id` disappears. */
+function neighbourOf(id) {
+  const flat = flatRows();
+  const i = flat.findIndex(r => r.type === 'task' && r.id === id);
+  if (i === -1) return null;
+  return flat[i + 1] ?? flat[i - 1] ?? null;
+}
+
+/* ── sections ─────────────────────────────────────────────────────────── */
+function addSection(name = 'New section') {
+  const list = sections();
+  const sec = { id: uid(), name, order: keyAt(list, list.length), collapsed: false };
+  state.sections.push(sec);
+  state.cursor = { type: 'section', id: sec.id };
+  renaming = sec.id;
+  commit();
+  scrollToSection(sec.id);
+  const input = $('.tab-rename');
+  if (input) { input.focus(); input.select(); }
+  return sec;
+}
+
+function renameSection(id, name) {
+  const sec = sectionById(id);
+  if (!sec) return;
+  const next = name.trim();
+  if (!next) { toast('A section needs a name, so nothing changed.'); return; }
+  sec.name = next;
+  save();
+}
+
+function deleteSection(id) {
+  const sec = sectionById(id);
+  if (!sec) return;
+  const owned = tasksIn(id);
+  const list = sections();
+  const i = list.findIndex(s => s.id === id);
+  state.sections = state.sections.filter(s => s.id !== id);
+  state.tasks = state.tasks.filter(t => t.sectionId !== id);
+  pushUndo({ kind: 'section', section: sec, tasks: owned });
+  const next = list[i + 1] ?? list[i - 1] ?? null;
+  state.cursor = next ? { type: 'section', id: next.id } : null;
+  commit();
+  toast(`Deleted ${sec.name}${owned.length ? ` and the ${owned.length} task${owned.length === 1 ? '' : 's'} in it` : ''}.`, 'Undo');
+}
+
+function nudgeSection(id, dir) {
+  const sec = sectionById(id);
+  if (!sec) return;
+  const list = sections();
+  const i = list.findIndex(s => s.id === id);
+  const j = i + dir;
+  if (j < 0 || j >= list.length) return;
+  const rest = list.filter(s => s.id !== id);
+  sec.order = keyAt(rest, j);
+  state.cursor = { type: 'section', id };
+  commit();
+  focusCursor();
+  scrollToSection(id);
+}
+
+function toggleCollapse(id) {
+  const sec = sectionById(id);
+  if (!sec) return;
+  sec.collapsed = !sec.collapsed;
+  state.cursor = { type: 'section', id };
+  commit();
+  focusCursor();
+}
+
+function scrollToSection(id) {
+  const el = document.querySelector(`.folder[data-section="${CSS.escape(id)}"]`);
+  if (el && !inView(el)) el.scrollIntoView({ block: 'center', behavior: motionOk() ? 'smooth' : 'auto' });
+}
+
+/* ═════════════════════════════════════════════════════════════════════════
+   CURSOR — one linear run down the drawer: tab, its tasks, next tab…
+   ═════════════════════════════════════════════════════════════════════════ */
+function flatRows() {
+  const out = [];
+  for (const sec of sections()) {
+    out.push({ type: 'section', id: sec.id });
+    if (!sec.collapsed) for (const t of visibleIn(sec.id)) out.push({ type: 'task', id: t.id });
+  }
+  return out;
+}
+
+function moveCursor(delta) {
+  const flat = flatRows();
+  if (!flat.length) return;
+  let i = state.cursor ? flat.findIndex(r => r.type === state.cursor.type && r.id === state.cursor.id) : -1;
+  if (i === -1) i = delta > 0 ? -1 : flat.length;
+  const next = Math.min(flat.length - 1, Math.max(0, i + delta));
+  setCursor(flat[next]);
+}
+
+function setCursor(row) {
+  if (!row) return;
+  state.cursor = row;
+  save();
+  // A task wears .is-cursor itself; a section wears it on the folder, since
+  // the tab's own background is already the tape colour.
+  document.querySelectorAll('.task.is-cursor, .folder.is-cursor')
+    .forEach(x => x.classList.remove('is-cursor'));
+  document.querySelectorAll('[data-cursor-id]').forEach(x => { x.tabIndex = -1; });
+
+  const el = cursorEl();
+  if (el) {
+    (el.classList.contains('task') ? el : el.closest('.folder'))?.classList.add('is-cursor');
+    el.tabIndex = 0;
+    el.focus({ preventScroll: true });
+    if (!inView(el)) el.scrollIntoView({ block: 'nearest', behavior: motionOk() ? 'smooth' : 'auto' });
+  } else {
+    render();
+    focusCursor();
+  }
+}
+
+function cursorEnds(which) {
+  const flat = flatRows();
+  if (flat.length) setCursor(which === 'first' ? flat[0] : flat[flat.length - 1]);
+}
+
+/** Bring a task into view whatever is hiding it — a shut section, a filter. */
+function reveal(id, { quiet = false } = {}) {
+  const t = taskById(id);
+  if (!t) return;
+  const sec = sectionById(t.sectionId);
+  let note = null;
+
+  if (sec?.collapsed) { sec.collapsed = false; note = `Opened ${sec.name}.`; }
+  if (!passesFilter(t)) {
+    const was = FILTER_WORD[state.filter];
+    state.filter = 'all';
+    note = `Switched off the ${was} filter — that task was hidden by it.`;
+  }
+  state.cursor = { type: 'task', id };
+  commit();
+
+  const el = document.querySelector(`.task[data-task="${CSS.escape(id)}"]`);
+  if (el) {
+    el.scrollIntoView({ block: 'center', behavior: motionOk() ? 'smooth' : 'auto' });
+    el.classList.add('is-revealed');
+    el.focus({ preventScroll: true });
+  }
+  if (note && !quiet) toast(note);
+}
+
+/* ═════════════════════════════════════════════════════════════════════════
+   POINTER WIRING — one delegated listener for the whole document
+   ═════════════════════════════════════════════════════════════════════════ */
+document.addEventListener('click', e => {
+  const hit = e.target.closest('[data-act]');
+  if (!hit) {
+    // clicking a task's text starts editing it
+    const text = e.target.closest('.task-text');
+    if (text) {
+      const id = text.closest('.task').dataset.task;
+      state.cursor = { type: 'task', id };
+      startEdit(id);
+    }
+    return;
+  }
+
+  const act = hit.dataset.act;
+  const task = hit.dataset.task;
+  const section = hit.dataset.section;
+
+  switch (act) {
+    case 'toggle':          toggleTask(task); break;
+    case 'task-up':         nudgeTask(task, -1); break;
+    case 'task-down':       nudgeTask(task, +1); break;
+    case 'move-task':       openMove(task); break;
+    case 'delete-task':     deleteTask(task); break;
+
+    case 'toggle-collapse': toggleCollapse(section); break;
+    case 'rename-section':  startRename(section); break;
+    case 'section-up':      nudgeSection(section, -1); break;
+    case 'section-down':    nudgeSection(section, +1); break;
+    case 'delete-section':  confirmDeleteSection(section); break;
+    case 'new-section':     addSection(); break;
+    case 'reseed':          seed(); commit(); toast('Started fresh with the standard four sections.'); break;
+
+    case 'open-adder':      openAdder(section); break;
+    case 'filter':          setFilter(hit.dataset.filter); break;
+    case 'undo':            dismissToast(); undo(); break;
+    case 'toast-close':     dismissToast(); break;
+    case 'close-dialog':    hit.closest('dialog')?.close(); break;
+    case 'capture-here': {
+      const text = hit.dataset.text || '';
+      $('#dlg-search').close();
+      captureInput.value = text;
+      state.captureDraft = text;
+      save();
+      captureInput.focus();
+      captureInput.setSelectionRange(text.length, text.length);
+      break;
+    }
+  }
+
+  // Repeat-clicking a reorder arrow should keep working: the rebuild throws
+  // the old button away, so put focus on its replacement.
+  if (['task-up', 'task-down', 'section-up', 'section-down'].includes(act)) {
+    const key = task ? `[data-task="${CSS.escape(task)}"]` : `[data-section="${CSS.escape(section)}"]`;
+    const again = drawerEl.querySelector(`.icon-btn[data-act="${act}"]${key}`);
+    if (again && again.offsetParent !== null) {
+      again.closest('.task')?.classList.add('is-acting');
+      again.focus({ preventScroll: true });
+    }
+  }
+});
+
+document.querySelectorAll('.filters button').forEach(b =>
+  b.addEventListener('click', () => setFilter(b.dataset.filter)));
+$('#btn-search').addEventListener('click', () => openSearch());
+$('#btn-help').addEventListener('click', () => openHelp());
+
+function setFilter(f) {
+  if (!['all', 'active', 'done'].includes(f) || f === state.filter) return;
+  state.filter = f;
+  // Don't strand the cursor on something the new filter hides.
+  if (state.cursor?.type === 'task') {
+    const t = taskById(state.cursor.id);
+    if (t && !passesFilter(t)) state.cursor = { type: 'section', id: t.sectionId };
+  }
+  commit();
+}
+
+/* ── capture ──────────────────────────────────────────────────────────── */
+const captureInput = $('#capture-input');
+const captureForm = $('#capture-form');
+
+captureForm.addEventListener('submit', e => {
+  e.preventDefault();
+  if (doCapture(captureInput.value)) {
+    captureForm.classList.add('is-filing');
+    setTimeout(() => { captureForm.classList.remove('is-filing'); captureInput.value = ''; }, motionOk() ? 160 : 0);
+  }
+  captureInput.focus();
+});
+
+captureInput.addEventListener('input', () => { state.captureDraft = captureInput.value; save(); });
+
+captureInput.addEventListener('paste', e => {
+  const text = e.clipboardData?.getData('text') ?? '';
+  if (!/\r?\n/.test(text.trim())) return;      // one line pastes normally
+  e.preventDefault();
+  const merged = captureInput.value.slice(0, captureInput.selectionStart) + text
+               + captureInput.value.slice(captureInput.selectionEnd);
+  doCapture(merged);
+  captureInput.value = '';
+  captureInput.focus();
+});
+
+captureInput.addEventListener('keydown', e => {
+  if (!e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+  e.preventDefault();
+  const list = sections();
+  if (list.length < 2) return;
+  const i = list.findIndex(s => s.id === state.captureTarget);
+  const j = (i + (e.key === 'ArrowDown' ? 1 : -1) + list.length) % list.length;
+  state.captureTarget = list[j].id;
+  save();
+  renderCaptureTarget();
+});
+
+$('#capture-target-select').addEventListener('change', e => {
+  state.captureTarget = e.target.value;
+  save();
+});
+
+/* ── inline editing ───────────────────────────────────────────────────── */
+function startEdit(id) { editing = id; adding = null; renaming = null; render();
+  const i = $('.task-edit'); if (i) { i.focus(); i.setSelectionRange(i.value.length, i.value.length); } }
+function startRename(id) { renaming = id; editing = null; adding = null; render();
+  const i = $('.tab-rename'); if (i) { i.focus(); i.select(); } }
+function openAdder(id) {
+  const sec = sectionById(id);
+  if (sec?.collapsed) sec.collapsed = false;
+  adding = id; editing = null; renaming = null;
+  state.cursor = { type: 'section', id };
+  render();
+  const i = $('.adder-input'); if (i) { i.focus(); i.scrollIntoView({ block: 'nearest' }); }
+}
+function stopInline({ silent = false } = {}) {
+  const had = editing || renaming || adding;
+  editing = renaming = adding = null;
+  if (had && !silent) render();
+  return !!had;
+}
+
+document.addEventListener('keydown', e => {
+  const el = e.target;
+
+  // Every branch here stops propagation: without it the global handler sees
+  // the same Enter, finds the cursor back on a row, and reopens the editor
+  // you just closed.
+  if (el.classList?.contains('task-edit')) {
+    if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); const id = editing; renameTask(id, el.value); stopInline(); focusCursor(); }
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); stopInline(); focusCursor(); }
+    return;
+  }
+  if (el.classList?.contains('tab-rename')) {
+    if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); const id = renaming; renameSection(id, el.value); stopInline(); focusCursor(); }
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); stopInline(); focusCursor(); }
+    return;
+  }
+  if (el.classList?.contains('adder-input')) {
+    if (e.key === 'Enter') {
+      e.preventDefault(); e.stopPropagation();
+      const id = el.dataset.section;
+      const made = addTask(id, el.value);
+      el.value = '';
+      if (made) { render(); const again = $('.adder-input'); if (again) again.focus();
+                  document.querySelector(`.task[data-task="${CSS.escape(made.id)}"]`)?.classList.add('is-landed'); }
+    }
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); stopInline(); focusCursor(); }
+    return;
+  }
+}, true);
+
+// blur commits, so clicking away never silently drops what you typed
+document.addEventListener('focusout', e => {
+  const el = e.target;
+  if (el.classList?.contains('task-edit') && editing) { renameTask(editing, el.value); stopInline(); }
+  else if (el.classList?.contains('tab-rename') && renaming) { renameSection(renaming, el.value); stopInline(); }
+  else if (el.classList?.contains('adder-input') && adding) {
+    const id = el.dataset.section, text = el.value;
+    if (text.trim()) addTask(id, text);
+    stopInline();
+  }
+  const row = el.closest?.('.task.is-acting');
+  if (row && !row.contains(e.relatedTarget)) row.classList.remove('is-acting');
+});
+
+/* ═════════════════════════════════════════════════════════════════════════
+   KEYBOARD — the whole app, without a mouse
+   ═════════════════════════════════════════════════════════════════════════ */
+const isTyping = el => el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' ||
+                              el.tagName === 'SELECT' || el.isContentEditable);
+
+document.addEventListener('keydown', e => {
+  const el = document.activeElement;
+  const typing = isTyping(el);
+  const dialog = document.querySelector('dialog[open]');
+
+  if (e.key === 'Escape') {
+    if (dialog) return;                       // dialogs close themselves
+    if (stopInline()) { focusCursor(); return; }
+    if (typing) { el.blur(); return; }
+    return;
+  }
+  if (dialog) return;                          // dialogs own their own keys
+  if (e.ctrlKey || e.metaKey) {
+    const k = e.key.toLowerCase();
+    if (k === 'k') { e.preventDefault(); openSearch(); return; }
+    if (k === 'z' && !typing) { e.preventDefault(); dismissToast(); undo(); return; }
+    if (k === 'enter' && el === captureInput) { e.preventDefault(); captureForm.requestSubmit(); return; }
+    return;
+  }
+
+  const cur = state.cursor;
+  const onTask = cur?.type === 'task' && taskById(cur.id);
+  const onSection = cur?.type === 'section' && sectionById(cur.id);
+
+  // Anything focusable that isn't the cursor row keeps its own Enter/Space.
+  // Without this, hitting Enter on "New section" would both click it and
+  // start renaming whatever the cursor happened to be sitting on.
+  const isCursorEl = el && el === cursorEl();
+  if (!isCursorEl && (e.key === 'Enter' || e.key === ' ') &&
+      (el?.tagName === 'BUTTON' || el?.tagName === 'A')) return;
+
+  // Destructive keys only fire when attention is actually in the drawer.
+  const inDrawer = el === document.body || (drawerEl && drawerEl.contains(el));
+
+  // Alt+arrows reorder whatever the cursor is on. Works even while typing
+  // in the capture bar, where it retargets instead (handled above).
+  if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+    if (typing) return;
+    e.preventDefault();
+    const dir = e.key === 'ArrowDown' ? 1 : -1;
+    if (onTask) nudgeTask(cur.id, dir);
+    else if (onSection) nudgeSection(cur.id, dir);
+    return;
+  }
+  if (e.altKey || typing) return;
+
+  switch (e.key) {
+    case 'ArrowDown': case 'j': e.preventDefault(); moveCursor(+1); return;
+    case 'ArrowUp':   case 'k': e.preventDefault(); moveCursor(-1); return;
+    case 'Home':      e.preventDefault(); cursorEnds('first'); return;
+    case 'End':       e.preventDefault(); cursorEnds('last'); return;
+    case 'ArrowRight': {
+      e.preventDefault();
+      if (onTask) {
+        const row = cursorEl();
+        row?.classList.add('is-acting');
+        firstVisible(row?.querySelectorAll('.task-actions .icon-btn'))?.focus();
+      } else if (onSection) {
+        const tools = cursorEl()?.closest('.tab-row')?.querySelectorAll('.tab-tools .icon-btn');
+        firstVisible(tools)?.focus();
+      }
+      return;
+    }
+    case 'ArrowLeft': {
+      const row = el.closest?.('.task');
+      const tools = el.closest?.('.tab-tools');
+      if (!row && !tools) return;
+      e.preventDefault();
+      row?.classList.remove('is-acting');
+      (row ?? cursorEl())?.focus();
+      return;
+    }
+    case ' ': {
+      e.preventDefault();
+      if (onTask) toggleTask(cur.id);
+      else if (onSection) toggleCollapse(cur.id);
+      return;
+    }
+    case 'Enter': {
+      if (onTask) { e.preventDefault(); startEdit(cur.id); }
+      else if (onSection) { e.preventDefault(); startRename(cur.id); }
+      return;
+    }
+    case 'Backspace': case 'Delete': {
+      if (!inDrawer) return;
+      e.preventDefault();
+      if (onTask) deleteTask(cur.id);
+      else if (onSection) confirmDeleteSection(cur.id);
+      return;
+    }
+    case '1': e.preventDefault(); setFilter('all'); return;
+    case '2': e.preventDefault(); setFilter('active'); return;
+    case '3': e.preventDefault(); setFilter('done'); return;
+    case '/': e.preventDefault(); openSearch(); return;
+    case '?': e.preventDefault(); openHelp(); return;
+  }
+
+  const k = e.key.toLowerCase();
+  if (k === 'c') { e.preventDefault(); captureInput.focus(); captureInput.select();
+                   window.scrollTo({ top: 0, behavior: motionOk() ? 'smooth' : 'auto' }); return; }
+  if (k === 'x') { e.preventDefault(); if (onTask) toggleTask(cur.id); return; }
+  if (k === 'a') {
+    e.preventDefault();
+    const id = onTask ? taskById(cur.id).sectionId : onSection ? cur.id : sections()[0]?.id;
+    if (id) openAdder(id);
+    return;
+  }
+  if (k === 'm') { e.preventDefault(); if (onTask) openMove(cur.id); return; }
+  if (k === 's') { e.preventDefault(); addSection(); return; }
+});
+
+/* ═════════════════════════════════════════════════════════════════════════
+   DIALOGS
+   Native <dialog>.showModal() gives inert background and a focus trap for
+   free; the scroll lock is ours. scrollbar-gutter keeps the page from
+   jumping when the bar disappears.
+   ═════════════════════════════════════════════════════════════════════════ */
+const dlgSearch = $('#dlg-search');
+const dlgMove = $('#dlg-move');
+const dlgConfirm = $('#dlg-confirm');
+const dlgHelp = $('#dlg-help');
+
+let returnFocus = null;
+
+function openDialog(dlg) {
+  returnFocus = document.activeElement;
+  document.documentElement.classList.add('is-locked');
+  dlg.showModal();
+}
+document.querySelectorAll('dialog').forEach(dlg => {
+  dlg.addEventListener('close', () => {
+    if (!document.querySelector('dialog[open]')) document.documentElement.classList.remove('is-locked');
+    const back = returnFocus;
+    returnFocus = null;
+    if (back && document.contains(back)) back.focus({ preventScroll: true });
+    else focusCursor();
+  });
+  // click the backdrop to dismiss
+  dlg.addEventListener('click', e => { if (e.target === dlg) dlg.close(); });
+});
+
+/* ── search ───────────────────────────────────────────────────────────── */
+let searchQuery = '';   // session-only, on purpose
+let searchCursor = 0;
+let searchHits = [];
+
+function openSearch() {
+  searchQuery = '';
+  searchCursor = 0;
+  dlgSearch.innerHTML = `
+    <div class="search-field">
+      ${ICON.search}
+      <input id="search-input" placeholder="Find a task in any section" aria-label="Search tasks"
+             autocomplete="off" spellcheck="false">
+      <button type="button" class="icon-btn" data-act="close-dialog" aria-label="Close">${ICON.close}</button>
+    </div>
+    <div class="dlg-body" id="search-results"></div>`;
+  openDialog(dlgSearch);
+  const input = $('#search-input');
+  input.addEventListener('input', () => { searchQuery = input.value; searchCursor = 0; renderSearch(); });
+  input.addEventListener('keydown', onSearchKey);
+  renderSearch();
+  input.focus();
+}
+
+function onSearchKey(e) {
+  if (e.key === 'ArrowDown') { e.preventDefault(); searchCursor = Math.min(searchHits.length - 1, searchCursor + 1); paintSearchCursor(); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); searchCursor = Math.max(0, searchCursor - 1); paintSearchCursor(); }
+  else if (e.key === 'Enter') {
+    e.preventDefault();
+    const hit = searchHits[searchCursor];
+    if (hit) { dlgSearch.close(); reveal(hit.id); }
+    else if (searchQuery.trim()) { const t = searchQuery.trim(); dlgSearch.close(); captureInput.value = t; captureInput.focus(); }
+  }
+}
+
+function renderSearch() {
+  const q = searchQuery.trim().toLowerCase();
+  const body = $('#search-results');
+  if (!q) {
+    searchHits = [];
+    body.innerHTML = `<div class="empty-block">
+      <h2>Search every section</h2>
+      <p>Type a word from a task. Results land grouped by the section they live in.
+         Enter opens the one under the cursor — even if a filter or a shut section is hiding it.</p>
+    </div>`;
+    return;
+  }
+
+  searchHits = [];
+  const groups = [];
+  for (const sec of sections()) {
+    const hits = tasksIn(sec.id).filter(t => t.text.toLowerCase().includes(q));
+    if (hits.length) { groups.push({ sec, hits }); searchHits.push(...hits); }
+  }
+
+  if (!searchHits.length) {
+    body.innerHTML = `<div class="empty-block">
+      <h2>Nothing matches “${esc(clip(searchQuery.trim(), 30))}”</h2>
+      <p>Search reads task text only — no dates, no tags, because there aren’t any.
+         Try a shorter word, or file this as a new task instead.</p>
+      <div class="empty-actions">
+        <button type="button" class="btn btn-primary" data-act="capture-here"
+          data-text="${esc(searchQuery.trim())}">Capture it instead</button>
+        <span class="kbd">Enter</span>
+      </div>
+    </div>`;
+    return;
+  }
+
+  body.innerHTML = groups.map(g => `
+    <div class="res-group">
+      <p class="res-head">${esc(g.sec.name)}</p>
+      ${g.hits.map(t => `
+        <button type="button" class="res${t.done ? ' is-done' : ''}" data-hit="${esc(t.id)}">
+          <span class="res-mark">${t.done ? ICON.check : ICON.dot}</span>
+          <span class="res-text">${highlight(t.text, q)}</span>
+        </button>`).join('')}
+    </div>`).join('');
+
+  body.querySelectorAll('.res').forEach((el, i) => {
+    el.addEventListener('click', () => { dlgSearch.close(); reveal(el.dataset.hit); });
+    el.addEventListener('mousemove', () => { if (searchCursor !== i) { searchCursor = i; paintSearchCursor(); } });
+  });
+  paintSearchCursor();
+}
+
+function paintSearchCursor() {
+  const rows = dlgSearch.querySelectorAll('.res');
+  rows.forEach((el, i) => el.classList.toggle('is-cursor', i === searchCursor));
+  rows[searchCursor]?.scrollIntoView({ block: 'nearest' });
+}
+
+function highlight(text, q) {
+  const i = text.toLowerCase().indexOf(q);
+  if (i === -1) return esc(text);
+  return esc(text.slice(0, i)) + '<mark>' + esc(text.slice(i, i + q.length)) + '</mark>' + esc(text.slice(i + q.length));
+}
+
+/* ── file in another section ──────────────────────────────────────────── */
+let moveCursorIdx = 0;
+let moveTaskId = null;
+
+function openMove(taskId) {
+  const t = taskById(taskId);
+  if (!t) return;
+  const list = sections();
+  if (list.length < 2) { toast('There is nowhere else to file it — add another section first.'); return; }
+  moveTaskId = taskId;
+  moveCursorIdx = Math.max(0, list.findIndex(s => s.id === t.sectionId));
+
+  dlgMove.innerHTML = `
+    <div class="dlg-head">
+      <h2>File “${esc(clip(t.text, 34))}” in</h2>
+      <button type="button" class="icon-btn" data-act="close-dialog" aria-label="Close">${ICON.close}</button>
+    </div>
+    <div class="dlg-body">
+      ${list.map((s, i) => `
+        <button type="button" class="pick" data-pick="${esc(s.id)}" data-i="${i}">
+          <span class="pick-name">${esc(s.name)}</span>
+          ${s.id === t.sectionId ? '<span class="pick-here">Here now</span>' : ICON.move}
+        </button>`).join('')}
+    </div>
+    <div class="dlg-foot">
+      <span class="spacer"></span>
+      <span class="kbd">&#8593;&#8595;</span><span class="kbd">Enter</span><span class="kbd">Esc</span>
+    </div>`;
+
+  openDialog(dlgMove);
+  dlgMove.querySelectorAll('.pick').forEach(el => {
+    el.addEventListener('click', () => { dlgMove.close(); applyMove(el.dataset.pick); });
+    el.addEventListener('mousemove', () => { moveCursorIdx = +el.dataset.i; paintMove(); });
+  });
+  dlgMove.onkeydown = onMoveKey;   // assignment, not addEventListener: reopening
+                                   // the dialog would otherwise stack handlers
+                                   // and make one arrow press jump several rows
+  paintMove();
+  dlgMove.querySelector('.pick')?.focus();
+}
+
+function applyMove(sectionId) {
+  const t = taskById(moveTaskId);
+  if (!t) return;
+  if (t.sectionId === sectionId) return;
+  const from = sectionById(t.sectionId)?.name ?? '';
+  moveTaskToSection(moveTaskId, sectionId);
+  toast(`Moved “${clip(t.text, 34)}” from ${from} to ${sectionById(sectionId).name}.`);
+}
+
+function onMoveKey(e) {
+  const picks = dlgMove.querySelectorAll('.pick');
+  if (e.key === 'ArrowDown') { e.preventDefault(); moveCursorIdx = Math.min(picks.length - 1, moveCursorIdx + 1); paintMove(); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); moveCursorIdx = Math.max(0, moveCursorIdx - 1); paintMove(); }
+  else if (e.key === 'Enter') {
+    e.preventDefault();
+    const pick = picks[moveCursorIdx];
+    if (pick) { dlgMove.close(); applyMove(pick.dataset.pick); }
+  }
+}
+
+function paintMove() {
+  const picks = dlgMove.querySelectorAll('.pick');
+  picks.forEach((el, i) => el.classList.toggle('is-cursor', i === moveCursorIdx));
+  picks[moveCursorIdx]?.scrollIntoView({ block: 'nearest' });
+}
+
+/* ── delete a section ─────────────────────────────────────────────────── */
+function confirmDeleteSection(id) {
+  const sec = sectionById(id);
+  if (!sec) return;
+  const n = tasksIn(id).length;
+  const warning = n
+    ? `This takes the ${n} task${n === 1 ? '' : 's'} filed in it too.`
+    : 'It has nothing in it.';
+
+  dlgConfirm.innerHTML = `
+    <div class="confirm-body">
+      <h2>Delete ${esc(sec.name)}?</h2>
+      <p>${warning} Deletion is permanent, but you can undo it once from the message that follows.</p>
+    </div>
+    <div class="dlg-foot">
+      <button type="button" class="btn" id="confirm-keep" data-act="close-dialog">Keep it</button>
+      <button type="button" class="btn btn-danger" id="confirm-go">Delete section</button>
+    </div>`;
+  openDialog(dlgConfirm);
+  $('#confirm-go').addEventListener('click', () => { dlgConfirm.close(); deleteSection(id); });
+  $('#confirm-keep').focus();   // a stray Enter should keep the section, not bin it
+}
+
+/* ── shortcuts ────────────────────────────────────────────────────────── */
+const KEYMAP = [
+  ['Capture and find', [
+    [['C'], 'Jump to capture'],
+    [['/'], 'Search every section'],
+    [['Ctrl', 'K'], 'Search every section'],
+    [['?'], 'This list'],
+    [['Esc'], 'Close, or cancel what you are typing'],
+  ]],
+  ['Moving around', [
+    [['&#8595;', '&#8593;'], 'Down and up the drawer'],
+    [['J', 'K'], 'The same, without arrows'],
+    [['&#8594;'], 'Step into a row’s buttons'],
+    [['&#8592;'], 'Step back out'],
+    [['Home', 'End'], 'First and last row'],
+  ]],
+  ['A task', [
+    [['Enter'], 'Edit the text'],
+    [['X'], 'Tick it done or undone'],
+    [['Space'], 'The same'],
+    [['A'], 'Add a task to this section'],
+    [['M'], 'File it in another section'],
+    [['Alt', '&#8593;&#8595;'], 'Move it within its section'],
+    [['Backspace'], 'Delete it — undoable'],
+  ]],
+  ['A section', [
+    [['Enter'], 'Rename it'],
+    [['Space'], 'Open or shut it'],
+    [['Alt', '&#8593;&#8595;'], 'Move the whole section'],
+    [['S'], 'New section'],
+    [['Backspace'], 'Delete it — asks first'],
+  ]],
+  ['Everything else', [
+    [['1', '2', '3'], 'Show all, active, or done'],
+    [['Ctrl', 'Z'], 'Undo the last delete'],
+  ]],
+];
+
+function openHelp() {
+  dlgHelp.innerHTML = `
+    <div class="dlg-head">
+      <h2>Keyboard</h2>
+      <button type="button" class="icon-btn" data-act="close-dialog" aria-label="Close">${ICON.close}</button>
+    </div>
+    <div class="dlg-body help-body">
+      ${KEYMAP.map(([title, rows]) => `
+        <div class="help-group">
+          <h3>${title}</h3>
+          ${rows.map(([keys, what]) => `
+            <div class="help-row">
+              <span class="help-keys">${keys.map(k => `<span class="kbd">${k}</span>`).join('')}</span>
+              <span>${what}</span>
+            </div>`).join('')}
+        </div>`).join('')}
+    </div>`;
+  openDialog(dlgHelp);
+  dlgHelp.querySelector('[data-act="close-dialog"]')?.focus();
+}
+
+/* ═════════════════════════════════════════════════════════════════════════
+   DRAG AND DROP — the mouse equivalent of Alt+arrows and M
+   Tasks move within and between sections; sections reorder by their tab.
+   Classes are poked directly during a drag rather than re-rendering, so
+   the drag image survives.
+   ═════════════════════════════════════════════════════════════════════════ */
+let drag = null;   // { kind: 'task' | 'section', id }
+
+const drawerEl = $('#drawer');
+
+drawerEl.addEventListener('dragstart', e => {
+  const tab = e.target.closest('.tab');
+  const task = e.target.closest('.task');
+  if (tab) {
+    drag = { kind: 'section', id: tab.closest('.folder').dataset.section };
+  } else if (task) {
+    drag = { kind: 'task', id: task.dataset.task };
+    task.classList.add('is-dragging');
+  } else return;
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', drag.id);
+});
+
+drawerEl.addEventListener('dragend', endDrag);
+
+drawerEl.addEventListener('dragover', e => {
+  if (!drag) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  clearDropHints();
+
+  if (drag.kind === 'section') {
+    const folder = e.target.closest('.folder');
+    if (!folder || folder.dataset.section === drag.id) return;
+    const r = folder.getBoundingClientRect();
+    folder.classList.add(e.clientY < r.top + r.height / 2 ? 'drop-before' : 'drop-after');
+    return;
+  }
+
+  const row = e.target.closest('.task');
+  if (row) {
+    if (row.dataset.task === drag.id) return;
+    const r = row.getBoundingClientRect();
+    row.classList.add(e.clientY < r.top + r.height / 2 ? 'drop-before' : 'drop-after');
+    return;
+  }
+  const folder = e.target.closest('.folder');
+  if (folder) folder.classList.add('is-drop-target');   // drop at the end of it
+});
+
+drawerEl.addEventListener('drop', e => {
+  if (!drag) return;
+  e.preventDefault();
+
+  if (drag.kind === 'section') {
+    const folder = e.target.closest('.folder');
+    const dragged = drag.id;
+    endDrag();
+    if (!folder || folder.dataset.section === dragged) return;
+    const list = sections().filter(s => s.id !== dragged);
+    const r = folder.getBoundingClientRect();
+    const at = list.findIndex(s => s.id === folder.dataset.section)
+             + (e.clientY < r.top + r.height / 2 ? 0 : 1);
+    const sec = sectionById(dragged);
+    sec.order = keyAt(list, at);
+    state.cursor = { type: 'section', id: sec.id };
+    commit();
+    return;
+  }
+
+  const row = e.target.closest('.task');
+  const folder = e.target.closest('.folder');
+  const id = drag.id;
+  endDrag();
+
+  if (row && row.dataset.task !== id) {
+    const target = taskById(row.dataset.task);
+    const r = row.getBoundingClientRect();
+    const siblings = tasksIn(target.sectionId).filter(t => t.id !== id);
+    const at = siblings.findIndex(t => t.id === target.id) + (e.clientY < r.top + r.height / 2 ? 0 : 1);
+    moveTaskToSection(id, target.sectionId, at);
+  } else if (folder) {
+    moveTaskToSection(id, folder.dataset.section, null);
+  }
+});
+
+/* Deliberately leaves .is-dragging alone — dragover fires constantly, and
+   stripping it there would un-dim the row you are still holding. */
+function clearDropHints() {
+  drawerEl.querySelectorAll('.drop-before, .drop-after, .is-drop-target')
+    .forEach(el => el.classList.remove('drop-before', 'drop-after', 'is-drop-target'));
+}
+function endDrag() {
+  drag = null;
+  clearDropHints();
+  drawerEl.querySelectorAll('.is-dragging').forEach(el => el.classList.remove('is-dragging'));
+}
+
+/* ═════════════════════════════════════════════════════════════════════════
+   BOOT
+   ═════════════════════════════════════════════════════════════════════════ */
+// the top bar grows a hairline once the drawer scrolls under it
+const topbar = $('#topbar');
+addEventListener('scroll', () => topbar.classList.toggle('is-stuck', window.scrollY > 6), { passive: true });
+
+// a second tab editing the same drawer shouldn't quietly diverge
+addEventListener('storage', e => {
+  if (e.key !== STORAGE_KEY || !e.newValue) return;
+  const typingHere = document.activeElement === captureInput;
+  const mine = captureInput.value;
+  load();
+  // Never clobber a draft being typed in this tab.
+  if (typingHere) state.captureDraft = mine; else captureInput.value = state.captureDraft ?? '';
+  render();
+  toast('Another tab changed this drawer, so it reloaded here.');
+});
+
+load();
+captureInput.value = state.captureDraft ?? '';
+render();   // render() settles the cursor itself, on a fresh drawer too
+
+// Pick up the draft where it was left; otherwise leave focus alone, so a
+// reload doesn't yank you somewhere you never were.
+if (state.captureDraft) {
+  captureInput.focus();
+  captureInput.setSelectionRange(captureInput.value.length, captureInput.value.length);
+}
+
+/* Sanity checks for the vendored order-key code. Off unless you ask:
+   open this file with #test on the URL and watch the console. */
+if (location.hash === '#test') {
+  const eq = (a, b, what) => console.assert(a === b, what, '→ got', a, 'want', b);
+  eq(generateKeyBetween(null, null), 'a0', 'first key');
+  eq(generateKeyBetween('a0', null), 'a1', 'append');
+  eq(generateKeyBetween(null, 'a0'), 'Zz', 'prepend');
+  eq(generateKeyBetween('a0', 'a1'), 'a0V', 'between');
+  eq(generateKeyBetween('a0V', 'a1'), 'a0l', 'between again');
+  eq(generateKeyBetween('Zz', 'a0'), 'ZzV', 'across the boundary');
+  eq(generateNKeysBetween(null, null, 3).join(' '), 'a0 a1 a2', 'three at once');
+  const many = generateNKeysBetween('a0', 'a1', 5);
+  eq(String(many.length), '5', 'five between');
+  eq(String([...many].sort().join() === many.join()), 'true', 'five stay sorted');
+  console.log('%cSimpleGTD order keys: checks finished', 'color:#0E4A42;font-weight:700');
+}
+</script>
